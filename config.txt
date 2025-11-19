@@ -1,0 +1,6 @@
+translate_key = [
+select_key = ]
+api_key = AIzaSyAMJNAuQDaBMixRr_akN0925swEpNmLpYQ
+groq_api_key = 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
+api_choice = groq
+prompt = Translate the following English text to Vietnamese. The translation must strictly use vocabulary and tone consistent with wuxia novels, make it as short as possible. Crucially, provide ONLY the translated text and nothing else. Do not include any introductory phrases, explanations, or conversational elements. Note: just output the translated text and make it as short as possible

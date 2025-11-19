@@ -1,0 +1,6 @@
+{
+  "translate_key": "[",
+  "select_key": "]",
+  "api_key": "AIzaSyAMJNAuQDaBMixRr_akN0925swEpNmLpYQ",
+  "prompt": "Translate the following English text to Vietnamese. The translation must strictly use vocabulary and tone consistent with wuxia (kiếm hiệp) novels. Crucially, provide ONLY the translated text and nothing else. Do not include any introductory phrases, explanations, or conversational elements.\n\n%s"
+}

@@ -1,0 +1,2 @@
+Set WshShell = CreateObject("WScript.Shell")
+WshShell.Run "powershell -WindowStyle Hidden -Command ""Start-Process python -ArgumentList 'screen_translator.py' -Verb RunAs -Wait -WindowStyle Minimized""", 0

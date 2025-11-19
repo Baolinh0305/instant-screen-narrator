@@ -1,0 +1,32 @@
+# Build directories
+build/
+dist/
+
+# Temporary files
+temp.png
+temp_ocr.png
+output_*.mp3
+
+# Config (optional, if sensitive)
+# config.txt
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
