@@ -5,30 +5,9 @@ A tool to select a screen region, OCR English text, translate to Vietnamese, and
 ## Features
 - Select screen region with GUI
 - OCR using Tesseract
-- Translate using Google Gemini API
+- Translate using Google Gemini API and Groq API
 - Text-to-speech in Vietnamese
 - Hotkeys: `[` to translate, `]` to reselect region
-
-## Setup
-
-1. Install Python 3.x
-
-2. Install dependencies:
-   ```
-   pip install -r requirements.txt
-   ```
-
-3. Copy Tesseract-OCR:
-   - Copy `C:\Program Files\Tesseract-OCR` to the project folder as `Tesseract-OCR`
-
-4. Configure settings:
-   - Edit `config.txt` to set your API key, hotkeys, and prompt
-
-5. Run the app:
-   - For source: Double-click `run_translator.vbs`
-   - For EXE: Double-click `run_exe.vbs` (requires copying Tesseract-OCR first)
-   - Press `]` to select region
-   - Press `[` to translate
 
 ## Files
 - `screen_translator.py`: Main script
@@ -45,4 +24,32 @@ A tool to select a screen region, OCR English text, translate to Vietnamese, and
 - Requires administrator privileges for hotkeys
 - Audio plays in background
 - Tested on Windows 11
-- For fullscreen video games, the selection window may not overlay properly; try running the game in windowed mode
+
+## Vietnamese Version
+
+# Công Cụ Dịch Màn Hình
+
+Một công cụ để chọn vùng màn hình, OCR văn bản tiếng Anh, dịch sang tiếng Việt và phát âm thanh.
+
+## Tính Năng
+- Chọn vùng màn hình với GUI
+- OCR sử dụng Tesseract
+- Dịch sử dụng Google Gemini API và Groq API
+- Chuyển văn bản thành giọng nói bằng tiếng Việt
+- Phím nóng: `[` để dịch, `]` để chọn lại vùng
+
+## Tệp
+- `screen_translator.py`: Tập lệnh chính
+- `config.txt`: Tệp cấu hình
+- `requirements.txt`: Các phụ thuộc Python
+- `run_translator.vbs`: Trình khởi chạy (chạy ẩn)
+- `run_translator.bat`: Trình khởi chạy thay thế
+- `run_exe.vbs`: Trình khởi chạy EXE
+- `dist/screen_translator.exe`: EXE đã biên dịch
+- `Tesseract-OCR/`: Tesseract di động (sao chép từ hệ thống)
+- `README.md`: Tệp này
+
+## Ghi Chú
+- Yêu cầu quyền quản trị viên cho phím nóng
+- Âm thanh phát ở nền
+- Đã thử nghiệm trên Windows 11
