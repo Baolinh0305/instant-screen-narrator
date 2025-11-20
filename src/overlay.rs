@@ -1,7 +1,9 @@
 use winapi::shared::windef::{POINT, RECT, HWND};
 use winapi::shared::minwindef::{WPARAM, LPARAM, LRESULT};
-use winapi::um::winuser::{GetSystemMetrics, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, CreateWindowExW, RegisterClassW, WNDCLASSW, UnregisterClassW, SetLayeredWindowAttributes, LWA_ALPHA, LoadCursorW, IDC_CROSS, FillRect, FrameRect, InvalidateRect, SetCapture, ReleaseCapture, GetCursorPos, PostMessageW, WM_CLOSE, WM_KEYDOWN, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_LBUTTONUP, WM_PAINT, WM_DESTROY, VK_ESCAPE, BeginPaint, EndPaint, PAINTSTRUCT, GetMessageW, TranslateMessage, DispatchMessageW, MSG, DefWindowProcW, PostQuitMessage, WS_EX_LAYERED, WS_EX_TOPMOST, WS_EX_TOOLWINDOW, WS_POPUP, WS_VISIBLE, DrawTextW, DT_CENTER, DT_VCENTER, DT_SINGLELINE, GetClientRect, GetWindowTextLengthW, GetWindowTextW, DT_LEFT, DT_WORDBREAK, SetTimer, KillTimer, WM_TIMER, GetDC, ReleaseDC, DT_CALCRECT};
-use winapi::um::wingdi::{CreateCompatibleDC, CreateCompatibleBitmap, SelectObject, DeleteObject, DeleteDC, BitBlt, SRCCOPY, CreateSolidBrush, SetTextColor, TRANSPARENT, CreateFontW, SetBkMode};
+use winapi::um::winuser::{GetSystemMetrics, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, CreateWindowExW, RegisterClassW, WNDCLASSW, UnregisterClassW, SetLayeredWindowAttributes, LWA_ALPHA, LoadCursorW, IDC_CROSS, FillRect, FrameRect, InvalidateRect, SetCapture, ReleaseCapture, GetCursorPos, PostMessageW, WM_CLOSE, WM_KEYDOWN, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_LBUTTONUP, WM_PAINT, WM_DESTROY, VK_ESCAPE, BeginPaint, EndPaint, PAINTSTRUCT, GetMessageW, TranslateMessage, DispatchMessageW, MSG, DefWindowProcW, PostQuitMessage, WS_EX_LAYERED, WS_EX_TOPMOST, WS_EX_TOOLWINDOW, WS_POPUP, WS_VISIBLE, DrawTextW, DT_CENTER, DT_VCENTER, GetClientRect, GetWindowTextLengthW, GetWindowTextW, DT_WORDBREAK, SetTimer, KillTimer, WM_TIMER, GetDC, ReleaseDC, DT_CALCRECT};
+use winapi::um::wingdi::{CreateCompatibleDC, CreateCompatibleBitmap, SelectObject, DeleteObject, DeleteDC, BitBlt, SRCCOPY, CreateSolidBrush, SetTextColor, CreateFontW, SetBkMode, CreateRoundRectRgn, AddFontMemResourceEx};
+use winapi::um::winuser::{SetWindowRgn, GetWindowRect, MoveWindow};
+use std::sync::Mutex;
 use winapi::um::libloaderapi::GetModuleHandleW;
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
@@ -15,6 +17,8 @@ fn to_wide(s: &str) -> Vec<u16> {
 static mut START_POS: POINT = POINT { x: 0, y: 0 };
 static mut CURR_POS: POINT = POINT { x: 0, y: 0 };
 static mut IS_DRAGGING: bool = false;
+
+static OVERLAY_LIST: Mutex<Vec<usize>> = Mutex::new(Vec::new());
 
 pub fn show_selection_overlay() {
     unsafe {
@@ -68,6 +72,11 @@ unsafe extern "system" fn selection_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARA
             0
         }
         WM_TIMER => {
+            // Remove from list
+            {
+                let mut list = OVERLAY_LIST.lock().unwrap();
+                list.retain(|&h| h != hwnd as usize);
+            }
             KillTimer(hwnd, 1);
             PostMessageW(hwnd, WM_CLOSE, 0, 0);
             0
@@ -178,30 +187,45 @@ pub fn show_result_window(target_rect: RECT, text: String, duration_ms: u32) {
         wc.hbrBackground = CreateSolidBrush(0x00000000);
         RegisterClassW(&wc);
 
+        let region_width = (target_rect.right - target_rect.left).abs();
+
         // Calculate text size
         let hdc_screen = GetDC(std::ptr::null_mut());
         let font_size = 20;
-        let hfont = CreateFontW(font_size, 0, 0, 0, 400, 0, 0, 0, 0, 0, 0, 2, 0, to_wide("Segoe UI").as_ptr());
+        let hfont = CreateFontW(font_size, 0, 0, 0, 400, 0, 0, 0, 0, 0, 0, 2, 0, to_wide("Roboto").as_ptr());
         SelectObject(hdc_screen, hfont as *mut winapi::ctypes::c_void);
-        let mut text_rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        let padding = 4;
+        let max_text_width = region_width - padding * 2;
+        let mut text_rect = RECT { left: 0, top: 0, right: max_text_width, bottom: 0 };
         let wide_text = to_wide(&text);
         DrawTextW(hdc_screen, wide_text.as_ptr(), -1, &mut text_rect, DT_CALCRECT | DT_WORDBREAK);
-        let text_width = text_rect.right - text_rect.left;
         let text_height = text_rect.bottom - text_rect.top;
         DeleteObject(hfont as *mut winapi::ctypes::c_void);
         ReleaseDC(std::ptr::null_mut(), hdc_screen);
 
-        let padding = 8;
-        let width = text_width + padding * 2;
         let height = text_height + padding * 2;
 
-        let region_width = (target_rect.right - target_rect.left).abs();
-        let region_center_x = target_rect.left + region_width / 2;
-        let x = region_center_x - width / 2;
+        let x = target_rect.left;
+        let width = region_width as i32;
         let mut y = target_rect.top - height - 10; // A little above
         if y < 0 {
             y = target_rect.top + 10; // Below if above is off-screen
         }
+
+        // Push existing overlays up
+        {
+            let list = OVERLAY_LIST.lock().unwrap();
+            for &hwnd_usize in list.iter() {
+                let hwnd = hwnd_usize as HWND;
+                let mut rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+                unsafe { GetWindowRect(hwnd, &mut rect); }
+                unsafe { MoveWindow(hwnd, rect.left, rect.top - height - 10, rect.right - rect.left, rect.bottom - rect.top, 1); }
+            }
+        }
+
+        // Load Roboto font
+        let font_data = include_bytes!("roboto.ttf");
+        let _font_handle = AddFontMemResourceEx(font_data.as_ptr() as *mut winapi::ctypes::c_void, font_data.len() as u32, std::ptr::null_mut(), &mut 0);
 
         let hwnd = CreateWindowExW(
             WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TOOLWINDOW,
@@ -215,7 +239,16 @@ pub fn show_result_window(target_rect: RECT, text: String, duration_ms: u32) {
             std::ptr::null_mut()
         );
 
+        // Add to list
+        {
+            let mut list = OVERLAY_LIST.lock().unwrap();
+            list.push(hwnd as usize);
+        }
+
         SetLayeredWindowAttributes(hwnd, 0, 220, LWA_ALPHA);
+        let hrgn = CreateRoundRectRgn(0, 0, width, height, 8, 8);
+        SetWindowRgn(hwnd, hrgn, 1);
+        DeleteObject(hrgn as *mut winapi::ctypes::c_void);
         SetTimer(hwnd, 1, duration_ms, None);
 
         let mut msg: MSG = unsafe { std::mem::zeroed() };
@@ -270,7 +303,8 @@ unsafe extern "system" fn result_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, 
             let hfont = CreateFontW(font_size, 0, 0, 0, 400, 0, 0, 0, 0, 0, 0, 2, 0, to_wide("Segoe UI").as_ptr());
             SelectObject(hdc, hfont as *mut winapi::ctypes::c_void);
 
-            DrawTextW(hdc, buf.as_mut_ptr(), -1, &mut rect, DT_CENTER | DT_WORDBREAK | DT_VCENTER);
+            let mut draw_rect = rect;
+            DrawTextW(hdc, buf.as_mut_ptr(), -1, &mut draw_rect, DT_CENTER | DT_WORDBREAK | DT_VCENTER);
 
             DeleteObject(hfont as *mut winapi::ctypes::c_void);
             EndPaint(hwnd, &mut ps);
