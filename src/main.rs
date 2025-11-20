@@ -13,10 +13,10 @@ use rdev::{listen, Event, EventType};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use winapi::shared::windef::RECT;
 
+// Các biến toàn cục để quản lý trạng thái giữa UI và luồng ngầm
 static LAST_SELECT: AtomicU64 = AtomicU64::new(0);
 static OVERLAY_ACTIVE: AtomicBool = AtomicBool::new(false);
-// Thêm biến này để kiểm soát trạng thái tạm dừng/tiếp tục
-static LISTENING_PAUSED: AtomicBool = AtomicBool::new(true); 
+static LISTENING_PAUSED: AtomicBool = AtomicBool::new(true);
 
 struct MainApp {
     config: config::Config,
@@ -28,8 +28,8 @@ struct MainApp {
     hotkey_select: String,
     hotkey_instant: String,
     selected_api: String,
-    started: bool, // Trạng thái UI (Lock/Unlock)
-    listener_spawned: bool, // Kiểm tra xem service đã chạy lần đầu chưa
+    started: bool,
+    listener_spawned: bool,
     show_popup: bool,
     popup_text: String,
     in_custom_mode: bool,
@@ -50,7 +50,7 @@ impl Default for MainApp {
             hotkey_instant: config.hotkey_instant,
             selected_api: config.selected_api,
             started: false,
-            listener_spawned: false, // Mặc định chưa chạy service
+            listener_spawned: false,
             show_popup: false,
             popup_text: String::new(),
             in_custom_mode: false,
@@ -59,218 +59,57 @@ impl Default for MainApp {
     }
 }
 
-impl eframe::App for MainApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let mut fonts = egui::FontDefinitions::default();
-        fonts.font_data.insert("roboto".to_owned(), egui::FontData::from_static(include_bytes!("roboto.ttf")));
-        fonts.families.get_mut(&egui::FontFamily::Proportional).unwrap().insert(0, "roboto".to_owned());
-        fonts.families.get_mut(&egui::FontFamily::Monospace).unwrap().push("roboto".to_owned());
-        ctx.set_fonts(fonts);
-        ctx.set_pixels_per_point(1.2);
-
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("Screen Translator");
-            egui::Frame::group(ui.style()).show(ui, |ui| {
-                ui.label("Chọn API để dịch:");
-                // Vô hiệu hóa UI khi started = true
-                ui.set_enabled(!self.started); 
-                ui.horizontal(|ui| {
-                    egui::ComboBox::from_label("")
-                        .selected_text(if self.selected_api == "gemini" { "Gemini" } else { "Groq" })
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut self.selected_api, "gemini".to_string(), "Gemini");
-                            ui.selectable_value(&mut self.selected_api, "groq".to_string(), "Groq");
-                        });
-                    ui.label(if self.selected_api == "gemini" { "Chậm, để cho vui không nên chọn" } else { "Nhanh, mỗi api key dịch được 1000 lần/ngày, hết thì đổi api key" });
-                });
-                ui.set_enabled(true); // Bật lại để nút popup vẫn bấm được nếu cần (tùy chọn)
-                ui.horizontal(|ui| {
-                    if self.selected_api == "groq" {
-                        if ui.button("Cách lấy groq api key").clicked() {
-                            self.show_popup = true;
-                            self.popup_text = "groq".to_string();
-                        }
-                    } else {
-                        if ui.button("Cách lấy gemini api key").clicked() {
-                            self.show_popup = true;
-                            self.popup_text = "gemini".to_string();
-                        }
-                    }
-                });
-                // Group lại để set enabled chung
-                ui.scope(|ui| {
-                    ui.set_enabled(!self.started);
-                    if self.selected_api == "gemini" {
-                        ui.horizontal(|ui| {
-                            ui.label("Nhập Gemini api key:");
-                            ui.add(egui::TextEdit::singleline(&mut self.gemini_api_key).password(true));
-                        });
-                    } else {
-                        ui.horizontal(|ui| {
-                            ui.label("Nhập Groq api key:");
-                            ui.add(egui::TextEdit::singleline(&mut self.groq_api_key).password(true));
-                        });
-                    }
-                });
-            });
-
-            egui::Frame::group(ui.style()).show(ui, |ui| {
-                ui.set_enabled(!self.started);
-                ui.label("Prompt Dịch:");
-                ui.horizontal(|ui| {
-                    if ui.button("Dịch kiểu kiếm hiệp").clicked() {
-                        self.current_prompt = config::Config::get_wuxia_prompt();
-                        self.in_custom_mode = false;
-                    }
-                    if ui.button("Dịch kiểu bình thường").clicked() {
-                        self.current_prompt = config::Config::get_normal_prompt();
-                        self.in_custom_mode = false;
-                    }
-                    if ui.button("Custom").clicked() {
-                        self.current_prompt = self.custom_prompt.clone();
-                        self.in_custom_mode = true;
-                    }
-                });
-                ui.add(egui::TextEdit::multiline(&mut self.current_prompt).desired_rows(5));
-                if self.in_custom_mode && ui.button("Lưu").clicked() {
-                    self.custom_prompt = self.current_prompt.clone();
-                    self.config.custom_prompt = self.custom_prompt.clone();
-                    self.config.save().unwrap();
-                }
-            });
-            ui.separator();
-            egui::Frame::group(ui.style()).show(ui, |ui| {
-                ui.set_enabled(!self.started);
-                ui.label("Phím tắt: (hiện chỉ hỗ trợ phím đơn)");
-                ui.horizontal(|ui| {
-                    ui.label("Nút dịch:");
-                    ui.add(egui::TextEdit::singleline(&mut self.hotkey_translate).desired_width(50.0));
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Nút chọn vùng cần dịch:");
-                    ui.add(egui::TextEdit::singleline(&mut self.hotkey_select).desired_width(50.0));
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Nút chụp nhanh:");
-                    ui.add(egui::TextEdit::singleline(&mut self.hotkey_instant).desired_width(50.0));
-                });
-            });
-            egui::Frame::group(ui.style()).show(ui, |ui| {
-                ui.set_enabled(!self.started);
-                ui.horizontal(|ui| {
-                    ui.checkbox(&mut self.use_tts, "Use TTS");
-                    ui.label("Đọc văn bản");
-                });
-                ui.horizontal(|ui| {
-                    ui.add_enabled(self.use_tts, egui::Checkbox::new(&mut self.config.split_tts, "Split TTS"));
-                    ui.label("Bắt buộc chọn, chia đoạn văn ra thành từng phần nhỏ để chuyển thành giọng nói rồi ghép lại");
-                });
-                ui.horizontal(|ui| {
-                    ui.checkbox(&mut self.config.show_overlay, "Hiển thị văn bản dịch trên vùng dịch");
-                });
-                ui.add(egui::Slider::new(&mut self.config.speed, 0.0..=2.0).text("Tốc độ đọc"));
-            });
-
-            // LOGIC NÚT BẤM START/STOP Ở ĐÂY
-            ui.add_space(10.0);
-            if !self.started {
-                // Trạng thái chưa bắt đầu hoặc đang tạm dừng
-                if ui.button("Bắt đầu").clicked() {
-                    // 1. Lưu config
-                    self.config.gemini_api_key = self.gemini_api_key.clone();
-                    self.config.groq_api_key = self.groq_api_key.clone();
-                    self.config.current_prompt = self.current_prompt.clone();
-                    self.config.hotkey_translate = self.hotkey_translate.clone();
-                    self.config.hotkey_select = self.hotkey_select.clone();
-                    self.config.hotkey_instant = self.hotkey_instant.clone();
-                    self.config.selected_api = self.selected_api.clone();
-                    self.config.use_tts = self.use_tts;
-                    self.config.save().unwrap();
-
-                    // 2. Lock UI
-                    self.started = true;
-
-                    // 3. Cho phép lắng nghe sự kiện
-                    LISTENING_PAUSED.store(false, Ordering::Relaxed);
-
-                    // 4. Chỉ spawn thread lần đầu tiên
-                    if !self.listener_spawned {
-                        self.start_service();
-                        self.listener_spawned = true;
-                    }
-                }
-            } else {
-                // Trạng thái đang chạy -> Hiển thị nút Dừng/Sửa
-                if ui.button("Mở khóa để chỉnh sửa").clicked() {
-                    // 1. Unlock UI
-                    self.started = false;
-                    
-                    // 2. Tạm dừng lắng nghe sự kiện (nhưng không kill thread)
-                    LISTENING_PAUSED.store(true, Ordering::Relaxed);
-                }
-            }
-            
-            ui.colored_label(egui::Color32::RED, "Lưu ý: Muốn dịch game hay app fullscreen thì phải chạy app bằng quyền quản trị");
-        });
-
-        if self.show_popup {
-            let mut open = true;
-            egui::Window::new("Hướng dẫn")
-                .open(&mut open)
-                .show(ctx, |ui| {
-                    if self.popup_text == "gemini" {
-                        ui.label("Để lấy Gemini API key:");
-                        ui.hyperlink_to("1. Vào https://aistudio.google.com/api-keys", "https://aistudio.google.com/api-keys");
-                        ui.label("...");
-                    } else if self.popup_text == "groq" {
-                        ui.label("Để lấy Groq API key:");
-                        ui.hyperlink_to("1. Vào https://console.groq.com/keys", "https://console.groq.com/keys");
-                        ui.label("...");
-                    }
-                    if ui.button("Đóng").clicked() {
-                        self.show_popup = false;
-                    }
-                });
-            if !open {
-                self.show_popup = false;
-            }
-        }
-    }
-}
-
-
 impl MainApp {
+    // Hàm cấu hình style cho giao diện đẹp hơn & Highlight Text Field
+    fn configure_style(&self, ctx: &egui::Context) {
+        let mut style = (*ctx.style()).clone();
+        
+        // 1. Tăng khoảng cách cho thoáng
+        style.spacing.item_spacing = egui::vec2(10.0, 10.0);
+        style.spacing.window_margin = egui::Margin::same(15.0);
+        
+        // 2. Bo tròn các góc
+        style.visuals.widgets.noninteractive.rounding = egui::Rounding::same(5.0);
+        style.visuals.widgets.inactive.rounding = egui::Rounding::same(5.0);
+        style.visuals.widgets.hovered.rounding = egui::Rounding::same(5.0);
+        style.visuals.widgets.active.rounding = egui::Rounding::same(5.0);
+
+        // 3. HIGHLIGHT TEXT FIELD: Tạo viền màu cho ô nhập liệu
+        let border_color = egui::Color32::from_rgb(100, 149, 237); // Màu Cornflower Blue (Xanh dịu)
+        
+        // Trạng thái bình thường (Inactive)
+        style.visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, border_color);
+        // Trạng thái khi di chuột vào (Hovered)
+        style.visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.5, border_color);
+        // Trạng thái khi đang gõ (Active/Open)
+        style.visuals.widgets.active.bg_stroke = egui::Stroke::new(2.0, border_color);
+        
+        ctx.set_style(style);
+    }
+
     fn start_service(&mut self) {
         let (tx, rx) = std::sync::mpsc::channel::<(String, bool, f32, bool)>();
         
-        // Thread xử lý TTS (không cần thay đổi nhiều)
         std::thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().unwrap();
             while let Ok((text, split_tts, speed, use_tts)) = rx.recv() {
                 rt.block_on(async {
-                    if let Err(_e) = tts::speak(&text, split_tts, speed, use_tts).await {
-                    }
+                    if let Err(_e) = tts::speak(&text, split_tts, speed, use_tts).await {}
                 });
             }
         });
 
-        // Thread lắng nghe phím
         std::thread::spawn(move || {
             let tx_clone = tx.clone();
             let callback = move |event: Event| {
-                // QUAN TRỌNG: Kiểm tra xem có đang bị tạm dừng không
                 if LISTENING_PAUSED.load(Ordering::Relaxed) {
                     return;
                 }
-
-                // Mỗi lần nhấn phím sẽ load lại config từ file -> Đảm bảo cập nhật thay đổi sau khi chỉnh sửa
                 let config = config::Config::load();
-                
                 if let EventType::KeyPress(_) = event.event_type {
                     if event.name.as_ref() == Some(&config.hotkey_translate) {
                         let tx = tx_clone.clone();
                         std::thread::spawn(move || {
-                            // Code xử lý dịch (giữ nguyên logic cũ)
                             let config = config::Config::load();
                             let selected_api = config.selected_api.clone();
                             let gemini_key = config.gemini_api_key.clone();
@@ -288,12 +127,8 @@ impl MainApp {
                                         let api_key = if selected_api == "gemini" { &gemini_key } else { &groq_key };
                                         if !api_key.is_empty() {
                                             match translation::translate_from_image(&selected_api, api_key, &prompt, &image_bytes).await {
-                                                Ok(translated) => {
-                                                    text.push_str(&translated);
-                                                }
-                                                Err(_) => {
-                                                    text.push_str("(Translation error)");
-                                                }
+                                                Ok(translated) => text.push_str(&translated),
+                                                Err(_) => text.push_str("(Translation error)"),
                                             }
                                         } else {
                                             text.push_str("(No API key set)");
@@ -311,9 +146,7 @@ impl MainApp {
                                                 right: region.x + region.width as i32,
                                                 bottom: region.y + region.height as i32,
                                             };
-                                            let char_count = text.chars().count();
-                                            let duration_sec = char_count as f32 / 10.0;
-                                            let duration_ms = (duration_sec * 1000.0) as u32;
+                                            let duration_ms = (text.chars().count() as f32 / 10.0 * 1000.0) as u32;
                                             std::thread::spawn(move || {
                                                 show_result_window(rect, text.clone(), duration_ms);
                                             });
@@ -360,17 +193,13 @@ impl MainApp {
                                                                right: region.x + region.width as i32,
                                                                bottom: region.y + region.height as i32,
                                                            };
-                                                           let char_count = translated.chars().count();
-                                                           let duration_sec = char_count as f32 / 10.0;
-                                                           let duration_ms = (duration_sec * 1000.0) as u32;
+                                                           let duration_ms = (translated.chars().count() as f32 / 10.0 * 1000.0) as u32;
                                                            std::thread::spawn(move || {
                                                                show_result_window(rect, translated.clone(), duration_ms);
                                                            });
                                                        }
                                                    }
-                                                   Err(_) => {
-                                                       println!("Translation error");
-                                                   }
+                                                   Err(_) => println!("Translation error"),
                                                }
                                            });
                                        }
@@ -387,10 +216,240 @@ impl MainApp {
     }
 }
 
+impl eframe::App for MainApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let mut fonts = egui::FontDefinitions::default();
+        fonts.font_data.insert("roboto".to_owned(), egui::FontData::from_static(include_bytes!("roboto.ttf")));
+        fonts.families.get_mut(&egui::FontFamily::Proportional).unwrap().insert(0, "roboto".to_owned());
+        fonts.families.get_mut(&egui::FontFamily::Monospace).unwrap().push("roboto".to_owned());
+        ctx.set_fonts(fonts);
+        ctx.set_pixels_per_point(1.2);
+
+        self.configure_style(ctx);
+
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.heading(egui::RichText::new("Screen Translator").strong().size(24.0));
+                ui.add_space(10.0);
+            });
+
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                
+                // --- KHỐI 1: CẤU HÌNH API (ĐÃ SỬA LAYOUT) ---
+                egui::CollapsingHeader::new(egui::RichText::new("🌐 Cấu hình API").strong())
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        egui::Grid::new("api_grid")
+                            .num_columns(2)
+                            .spacing([20.0, 15.0]) // Tăng khoảng cách dọc
+                            .striped(true)
+                            .show(ui, |ui| {
+                                // Dòng 1: Label Dịch vụ + ComboBox + Nút Hướng dẫn (Bên phải cùng)
+                                ui.label("Dịch vụ:");
+                                ui.horizontal(|ui| {
+                                    ui.add_enabled_ui(!self.started, |ui| {
+                                        egui::ComboBox::from_id_source("api_selector")
+                                            .selected_text(if self.selected_api == "gemini" { "Gemini (Không nên dùng)" } else { "Groq (Nhanh)" })
+                                            .width(200.0)
+                                            .show_ui(ui, |ui| {
+                                                ui.selectable_value(&mut self.selected_api, "gemini".to_string(), "Gemini (Không nên dùng)");
+                                                ui.selectable_value(&mut self.selected_api, "groq".to_string(), "Groq (Siêu nhanh)");
+                                            });
+                                    });
+                                    
+                                    // Đẩy nút Hướng dẫn về phía bên phải cùng
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        if ui.add(egui::Button::new(egui::RichText::new("❓ Hướng dẫn lấy Key").small())).clicked() {
+                                            self.show_popup = true;
+                                            self.popup_text = if self.selected_api == "gemini" { "gemini".to_string() } else { "groq".to_string() };
+                                        }
+                                    });
+                                });
+                                ui.end_row();
+
+                                // Dòng 2: Label API Key + Input Field (Ngang hàng, Full width)
+                                ui.label("API Key:");
+                                let key_ref = if self.selected_api == "gemini" { &mut self.gemini_api_key } else { &mut self.groq_api_key };
+                                ui.add_enabled(!self.started, egui::TextEdit::singleline(key_ref).password(true).desired_width(f32::INFINITY));
+                                ui.end_row();
+                            });
+                    });
+                
+                ui.add_space(5.0);
+
+                // --- KHỐI 2: PROMPT ---
+                egui::CollapsingHeader::new(egui::RichText::new("📝 Cấu hình Dịch (Prompt)").strong())
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        ui.add_enabled_ui(!self.started, |ui| {
+                            ui.horizontal(|ui| {
+                                if ui.button("🗡️ Kiếm hiệp").clicked() {
+                                    self.current_prompt = config::Config::get_wuxia_prompt();
+                                    self.in_custom_mode = false;
+                                }
+                                if ui.button("🌍 Thông thường").clicked() {
+                                    self.current_prompt = config::Config::get_normal_prompt();
+                                    self.in_custom_mode = false;
+                                }
+                                if ui.button("🔧 Custom").clicked() {
+                                    self.current_prompt = self.custom_prompt.clone();
+                                    self.in_custom_mode = true;
+                                }
+                            });
+                        });
+                        
+                        // Text field này cũng sẽ được highlight nhờ configure_style
+                        ui.add_enabled(!self.started, egui::TextEdit::multiline(&mut self.current_prompt).desired_rows(4).desired_width(f32::INFINITY));
+                        
+                        if self.in_custom_mode {
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                                if ui.add_enabled(!self.started, egui::Button::new("💾 Lưu Custom Prompt")).clicked() {
+                                    self.custom_prompt = self.current_prompt.clone();
+                                    self.config.custom_prompt = self.custom_prompt.clone();
+                                    self.config.save().unwrap();
+                                }
+                            });
+                        }
+                    });
+
+                ui.add_space(5.0);
+
+                // --- KHỐI 3: PHÍM TẮT ---
+                egui::CollapsingHeader::new(egui::RichText::new("⌨️ Phím tắt (hiện tại chỉ dùng được phím đơn)").strong())
+                    .default_open(true)
+                    .show(ui, |ui| {
+                         egui::Grid::new("hotkey_grid")
+                            .num_columns(2)
+                            .spacing([20.0, 10.0])
+                            .striped(true)
+                            .show(ui, |ui| {
+                                ui.label("Dịch vùng đã chọn:");
+                                ui.add_enabled(!self.started, egui::TextEdit::singleline(&mut self.hotkey_translate).desired_width(80.0));
+                                ui.end_row();
+
+                                ui.label("Chọn vùng mới:");
+                                ui.add_enabled(!self.started, egui::TextEdit::singleline(&mut self.hotkey_select).desired_width(80.0));
+                                ui.end_row();
+
+                                ui.label("Chụp & Dịch ngay:");
+                                ui.add_enabled(!self.started, egui::TextEdit::singleline(&mut self.hotkey_instant).desired_width(80.0));
+                                ui.end_row();
+                            });
+                    });
+
+                ui.add_space(5.0);
+
+                // --- KHỐI 4: CÀI ĐẶT KHÁC ---
+                egui::CollapsingHeader::new(egui::RichText::new("⚙️ Cài đặt hiển thị & Âm thanh").strong())
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        egui::Grid::new("settings_grid").num_columns(2).spacing([20.0, 10.0]).show(ui, |ui| {
+                            ui.label("Overlay:");
+                            ui.add_enabled(!self.started, egui::Checkbox::new(&mut self.config.show_overlay, "Hiện văn bản trên màn hình"));
+                            ui.end_row();
+
+                            ui.label("TTS (Đọc):");
+                            ui.horizontal(|ui| {
+                                ui.add_enabled(!self.started, egui::Checkbox::new(&mut self.use_tts, "Bật đọc giọng nói"));
+                                if self.use_tts {
+                                    ui.add_enabled(!self.started, egui::Checkbox::new(&mut self.config.split_tts, "Split TTS (Phải chọn, chia thành từng câu để convert to speech nhanh hơn)"));
+                                }
+                            });
+                            ui.end_row();
+
+                            ui.label("Tốc độ đọc:");
+                            ui.add_enabled(!self.started, egui::Slider::new(&mut self.config.speed, 0.5..=2.0).text("x"));
+                            ui.end_row();
+                        });
+                    });
+                
+                ui.add_space(20.0);
+
+                // --- LOGIC NÚT ACTION ---
+                ui.vertical_centered(|ui| {
+                    if !self.started {
+                        let start_btn = egui::Button::new(egui::RichText::new("🚀 BẮT ĐẦU SỬ DỤNG").size(20.0).strong().color(egui::Color32::WHITE))
+                            .min_size(egui::vec2(200.0, 50.0))
+                            .fill(egui::Color32::from_rgb(0, 120, 215)); 
+                        
+                        if ui.add(start_btn).clicked() {
+                            self.config.gemini_api_key = self.gemini_api_key.clone();
+                            self.config.groq_api_key = self.groq_api_key.clone();
+                            self.config.current_prompt = self.current_prompt.clone();
+                            self.config.hotkey_translate = self.hotkey_translate.clone();
+                            self.config.hotkey_select = self.hotkey_select.clone();
+                            self.config.hotkey_instant = self.hotkey_instant.clone();
+                            self.config.selected_api = self.selected_api.clone();
+                            self.config.use_tts = self.use_tts;
+                            self.config.save().unwrap();
+
+                            self.started = true;
+                            LISTENING_PAUSED.store(false, Ordering::Relaxed);
+
+                            if !self.listener_spawned {
+                                self.start_service();
+                                self.listener_spawned = true;
+                            }
+                        }
+                    } else {
+                        let stop_btn = egui::Button::new(egui::RichText::new("⏹ Dừng").size(20.0).strong().color(egui::Color32::WHITE))
+                            .min_size(egui::vec2(250.0, 50.0))
+                            .fill(egui::Color32::from_rgb(200, 50, 50));
+
+                        if ui.add(stop_btn).clicked() {
+                            self.started = false;
+                            LISTENING_PAUSED.store(true, Ordering::Relaxed);
+                        }
+                    }
+                    ui.add_space(10.0);
+                    ui.colored_label(egui::Color32::GRAY, "ℹ Chạy Admin nếu muốn dịch game Fullscreen");
+                });
+            });
+        });
+
+        if self.show_popup {
+            let mut open = true;
+            egui::Window::new("Hướng dẫn lấy API Key")
+                .collapsible(false)
+                .resizable(false)
+                .open(&mut open)
+                .show(ctx, |ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(10.0, 10.0);
+                    if self.popup_text == "gemini" {
+                        ui.heading("Gemini API");
+                        ui.horizontal(|ui| {
+                            ui.label("1. Vào:");
+                            ui.hyperlink("https://aistudio.google.com/api-keys");
+                        });
+                        ui.label("2. Đăng nhập Google -> Create API key");
+                        ui.label("3. Copy key và dán vào tool");
+                    } else if self.popup_text == "groq" {
+                        ui.heading("Groq API (Nhanh)");
+                        ui.horizontal(|ui| {
+                             ui.label("1. Vào:");
+                             ui.hyperlink("https://console.groq.com/keys");
+                        });
+                        ui.label("2. Đăng nhập -> Create API Key");
+                        ui.label("3. Copy key và dán vào tool");
+                    }
+                    ui.separator();
+                    ui.vertical_centered(|ui| {
+                        if ui.button("Đã hiểu").clicked() {
+                            self.show_popup = false;
+                        }
+                    });
+                });
+            if !open {
+                self.show_popup = false;
+            }
+        }
+    }
+}
+
 fn main() -> Result<(), eframe::Error> {
     let mut options = eframe::NativeOptions::default();
     options.viewport.transparent = Some(false);
-    options.viewport.inner_size = Some(egui::vec2(800.0, 800.0));
+    options.viewport.inner_size = Some(egui::vec2(900.0, 800.0));
     options.viewport.taskbar = Some(true);
     eframe::run_native(
         "Screen Translator",
