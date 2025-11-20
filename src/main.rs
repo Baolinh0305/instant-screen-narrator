@@ -15,7 +15,8 @@ use winapi::shared::windef::RECT;
 
 static LAST_SELECT: AtomicU64 = AtomicU64::new(0);
 static OVERLAY_ACTIVE: AtomicBool = AtomicBool::new(false);
-
+// Thêm biến này để kiểm soát trạng thái tạm dừng/tiếp tục
+static LISTENING_PAUSED: AtomicBool = AtomicBool::new(true); 
 
 struct MainApp {
     config: config::Config,
@@ -27,7 +28,8 @@ struct MainApp {
     hotkey_select: String,
     hotkey_instant: String,
     selected_api: String,
-    started: bool,
+    started: bool, // Trạng thái UI (Lock/Unlock)
+    listener_spawned: bool, // Kiểm tra xem service đã chạy lần đầu chưa
     show_popup: bool,
     popup_text: String,
     in_custom_mode: bool,
@@ -48,6 +50,7 @@ impl Default for MainApp {
             hotkey_instant: config.hotkey_instant,
             selected_api: config.selected_api,
             started: false,
+            listener_spawned: false, // Mặc định chưa chạy service
             show_popup: false,
             popup_text: String::new(),
             in_custom_mode: false,
@@ -69,7 +72,8 @@ impl eframe::App for MainApp {
             ui.heading("Screen Translator");
             egui::Frame::group(ui.style()).show(ui, |ui| {
                 ui.label("Chọn API để dịch:");
-                ui.set_enabled(!self.started);
+                // Vô hiệu hóa UI khi started = true
+                ui.set_enabled(!self.started); 
                 ui.horizontal(|ui| {
                     egui::ComboBox::from_label("")
                         .selected_text(if self.selected_api == "gemini" { "Gemini" } else { "Groq" })
@@ -79,7 +83,7 @@ impl eframe::App for MainApp {
                         });
                     ui.label(if self.selected_api == "gemini" { "Chậm, để cho vui không nên chọn" } else { "Nhanh, mỗi api key dịch được 1000 lần/ngày, hết thì đổi api key" });
                 });
-                ui.set_enabled(true);
+                ui.set_enabled(true); // Bật lại để nút popup vẫn bấm được nếu cần (tùy chọn)
                 ui.horizontal(|ui| {
                     if self.selected_api == "groq" {
                         if ui.button("Cách lấy groq api key").clicked() {
@@ -93,36 +97,42 @@ impl eframe::App for MainApp {
                         }
                     }
                 });
-                if self.selected_api == "gemini" {
-                    ui.horizontal(|ui| {
-                        ui.label("Nhập Gemini api key:");
-                        ui.add_enabled(!self.started, egui::TextEdit::singleline(&mut self.gemini_api_key).password(true));
-                    });
-                } else {
-                    ui.horizontal(|ui| {
-                        ui.label("Nhập Groq api key:");
-                        ui.add_enabled(!self.started, egui::TextEdit::singleline(&mut self.groq_api_key).password(true));
-                    });
-                }
+                // Group lại để set enabled chung
+                ui.scope(|ui| {
+                    ui.set_enabled(!self.started);
+                    if self.selected_api == "gemini" {
+                        ui.horizontal(|ui| {
+                            ui.label("Nhập Gemini api key:");
+                            ui.add(egui::TextEdit::singleline(&mut self.gemini_api_key).password(true));
+                        });
+                    } else {
+                        ui.horizontal(|ui| {
+                            ui.label("Nhập Groq api key:");
+                            ui.add(egui::TextEdit::singleline(&mut self.groq_api_key).password(true));
+                        });
+                    }
+                });
             });
+
             egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.set_enabled(!self.started);
                 ui.label("Prompt Dịch:");
                 ui.horizontal(|ui| {
-                    if ui.add_enabled(!self.started, egui::Button::new("Dịch kiểu kiếm hiệp")).clicked() {
+                    if ui.button("Dịch kiểu kiếm hiệp").clicked() {
                         self.current_prompt = config::Config::get_wuxia_prompt();
                         self.in_custom_mode = false;
                     }
-                    if ui.add_enabled(!self.started, egui::Button::new("Dịch kiểu bình thường")).clicked() {
+                    if ui.button("Dịch kiểu bình thường").clicked() {
                         self.current_prompt = config::Config::get_normal_prompt();
                         self.in_custom_mode = false;
                     }
-                    if ui.add_enabled(!self.started, egui::Button::new("Custom")).clicked() {
+                    if ui.button("Custom").clicked() {
                         self.current_prompt = self.custom_prompt.clone();
                         self.in_custom_mode = true;
                     }
                 });
-                ui.add_enabled(!self.started, egui::TextEdit::multiline(&mut self.current_prompt).desired_rows(5));
-                if self.in_custom_mode && ui.add_enabled(!self.started, egui::Button::new("Lưu")).clicked() {
+                ui.add(egui::TextEdit::multiline(&mut self.current_prompt).desired_rows(5));
+                if self.in_custom_mode && ui.button("Lưu").clicked() {
                     self.custom_prompt = self.current_prompt.clone();
                     self.config.custom_prompt = self.custom_prompt.clone();
                     self.config.save().unwrap();
@@ -130,51 +140,77 @@ impl eframe::App for MainApp {
             });
             ui.separator();
             egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.set_enabled(!self.started);
                 ui.label("Phím tắt: (hiện chỉ hỗ trợ phím đơn)");
                 ui.horizontal(|ui| {
                     ui.label("Nút dịch:");
-                    ui.add_enabled(!self.started, egui::TextEdit::singleline(&mut self.hotkey_translate).desired_width(50.0));
+                    ui.add(egui::TextEdit::singleline(&mut self.hotkey_translate).desired_width(50.0));
                 });
                 ui.horizontal(|ui| {
                     ui.label("Nút chọn vùng cần dịch:");
-                    ui.add_enabled(!self.started, egui::TextEdit::singleline(&mut self.hotkey_select).desired_width(50.0));
+                    ui.add(egui::TextEdit::singleline(&mut self.hotkey_select).desired_width(50.0));
                 });
                 ui.horizontal(|ui| {
                     ui.label("Nút chụp nhanh:");
-                    ui.add_enabled(!self.started, egui::TextEdit::singleline(&mut self.hotkey_instant).desired_width(50.0));
+                    ui.add(egui::TextEdit::singleline(&mut self.hotkey_instant).desired_width(50.0));
                 });
             });
             egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.set_enabled(!self.started);
                 ui.horizontal(|ui| {
-                    ui.add_enabled(!self.started, egui::Checkbox::new(&mut self.use_tts, "Use TTS"));
+                    ui.checkbox(&mut self.use_tts, "Use TTS");
                     ui.label("Đọc văn bản");
                 });
                 ui.horizontal(|ui| {
-                    ui.add_enabled(!self.started && self.use_tts, egui::Checkbox::new(&mut self.config.split_tts, "Split TTS"));
+                    ui.add_enabled(self.use_tts, egui::Checkbox::new(&mut self.config.split_tts, "Split TTS"));
                     ui.label("Bắt buộc chọn, chia đoạn văn ra thành từng phần nhỏ để chuyển thành giọng nói rồi ghép lại");
                 });
                 ui.horizontal(|ui| {
-                    ui.add_enabled(!self.started, egui::Checkbox::new(&mut self.config.show_overlay, "Hiển thị văn bản dịch trên vùng dịch"));
+                    ui.checkbox(&mut self.config.show_overlay, "Hiển thị văn bản dịch trên vùng dịch");
                 });
-                ui.add_enabled(!self.started, egui::Slider::new(&mut self.config.speed, 0.0..=2.0).text("Tốc độ đọc"));
+                ui.add(egui::Slider::new(&mut self.config.speed, 0.0..=2.0).text("Tốc độ đọc"));
             });
-            if !self.started && ui.button("Bắt đầu").clicked() {
-                // Save config
-                self.config.gemini_api_key = self.gemini_api_key.clone();
-                self.config.groq_api_key = self.groq_api_key.clone();
-                self.config.current_prompt = self.current_prompt.clone();
-                self.config.hotkey_translate = self.hotkey_translate.clone();
-                self.config.hotkey_select = self.hotkey_select.clone();
-                self.config.hotkey_instant = self.hotkey_instant.clone();
-                self.config.selected_api = self.selected_api.clone();
-                self.config.use_tts = self.use_tts;
-                self.config.save().unwrap();
 
-                self.start_service();
-                self.started = true;
+            // LOGIC NÚT BẤM START/STOP Ở ĐÂY
+            ui.add_space(10.0);
+            if !self.started {
+                // Trạng thái chưa bắt đầu hoặc đang tạm dừng
+                if ui.button("Bắt đầu").clicked() {
+                    // 1. Lưu config
+                    self.config.gemini_api_key = self.gemini_api_key.clone();
+                    self.config.groq_api_key = self.groq_api_key.clone();
+                    self.config.current_prompt = self.current_prompt.clone();
+                    self.config.hotkey_translate = self.hotkey_translate.clone();
+                    self.config.hotkey_select = self.hotkey_select.clone();
+                    self.config.hotkey_instant = self.hotkey_instant.clone();
+                    self.config.selected_api = self.selected_api.clone();
+                    self.config.use_tts = self.use_tts;
+                    self.config.save().unwrap();
+
+                    // 2. Lock UI
+                    self.started = true;
+
+                    // 3. Cho phép lắng nghe sự kiện
+                    LISTENING_PAUSED.store(false, Ordering::Relaxed);
+
+                    // 4. Chỉ spawn thread lần đầu tiên
+                    if !self.listener_spawned {
+                        self.start_service();
+                        self.listener_spawned = true;
+                    }
+                }
+            } else {
+                // Trạng thái đang chạy -> Hiển thị nút Dừng/Sửa
+                if ui.button("Mở khóa để chỉnh sửa").clicked() {
+                    // 1. Unlock UI
+                    self.started = false;
+                    
+                    // 2. Tạm dừng lắng nghe sự kiện (nhưng không kill thread)
+                    LISTENING_PAUSED.store(true, Ordering::Relaxed);
+                }
             }
+            
             ui.colored_label(egui::Color32::RED, "Lưu ý: Muốn dịch game hay app fullscreen thì phải chạy app bằng quyền quản trị");
-            ui.colored_label(egui::Color32::RED, "Sau khi nhấn Bắt đầu, muốn điều chỉnh thì tắt app mở lại");
         });
 
         if self.show_popup {
@@ -185,15 +221,11 @@ impl eframe::App for MainApp {
                     if self.popup_text == "gemini" {
                         ui.label("Để lấy Gemini API key:");
                         ui.hyperlink_to("1. Vào https://aistudio.google.com/api-keys", "https://aistudio.google.com/api-keys");
-                        ui.label("2. Đăng nhập");
-                        ui.label("3. Tạo API key");
-                        ui.label("4. Sao chép và dán vào");
+                        ui.label("...");
                     } else if self.popup_text == "groq" {
                         ui.label("Để lấy Groq API key:");
                         ui.hyperlink_to("1. Vào https://console.groq.com/keys", "https://console.groq.com/keys");
-                        ui.label("2. Đăng nhập");
-                        ui.label("3. Tạo API key");
-                        ui.label("4. Sao chép và dán vào");
+                        ui.label("...");
                     }
                     if ui.button("Đóng").clicked() {
                         self.show_popup = false;
@@ -208,26 +240,37 @@ impl eframe::App for MainApp {
 
 
 impl MainApp {
-
     fn start_service(&mut self) {
         let (tx, rx) = std::sync::mpsc::channel::<(String, bool, f32, bool)>();
+        
+        // Thread xử lý TTS (không cần thay đổi nhiều)
         std::thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().unwrap();
             while let Ok((text, split_tts, speed, use_tts)) = rx.recv() {
                 rt.block_on(async {
-                    if let Err(e) = tts::speak(&text, split_tts, speed, use_tts).await {
+                    if let Err(_e) = tts::speak(&text, split_tts, speed, use_tts).await {
                     }
                 });
             }
         });
+
+        // Thread lắng nghe phím
         std::thread::spawn(move || {
             let tx_clone = tx.clone();
             let callback = move |event: Event| {
+                // QUAN TRỌNG: Kiểm tra xem có đang bị tạm dừng không
+                if LISTENING_PAUSED.load(Ordering::Relaxed) {
+                    return;
+                }
+
+                // Mỗi lần nhấn phím sẽ load lại config từ file -> Đảm bảo cập nhật thay đổi sau khi chỉnh sửa
                 let config = config::Config::load();
+                
                 if let EventType::KeyPress(_) = event.event_type {
                     if event.name.as_ref() == Some(&config.hotkey_translate) {
                         let tx = tx_clone.clone();
                         std::thread::spawn(move || {
+                            // Code xử lý dịch (giữ nguyên logic cũ)
                             let config = config::Config::load();
                             let selected_api = config.selected_api.clone();
                             let gemini_key = config.gemini_api_key.clone();
@@ -235,6 +278,7 @@ impl MainApp {
                             let prompt = config.current_prompt;
                             let regions = config.fixed_regions.clone();
                             let split_tts = config.split_tts;
+                            
                             let rt = tokio::runtime::Runtime::new().unwrap();
                             rt.block_on(async {
                                 let mut text = String::new();
@@ -247,7 +291,7 @@ impl MainApp {
                                                 Ok(translated) => {
                                                     text.push_str(&translated);
                                                 }
-                                                Err(e) => {
+                                                Err(_) => {
                                                     text.push_str("(Translation error)");
                                                 }
                                             }
@@ -337,12 +381,11 @@ impl MainApp {
                    }
                 }
             };
-            if let Err(error) = listen(callback) {
+            if let Err(_error) = listen(callback) {
             }
         });
     }
 }
-
 
 fn main() -> Result<(), eframe::Error> {
     let mut options = eframe::NativeOptions::default();
