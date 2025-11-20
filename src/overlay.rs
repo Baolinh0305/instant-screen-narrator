@@ -1,19 +1,62 @@
 use winapi::shared::windef::{POINT, RECT, HWND};
 use winapi::shared::minwindef::{WPARAM, LPARAM, LRESULT};
-use winapi::um::winuser::{GetSystemMetrics, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, CreateWindowExW, RegisterClassW, WNDCLASSW, UnregisterClassW, SetLayeredWindowAttributes, LWA_ALPHA, LoadCursorW, IDC_CROSS, IDC_HAND, FillRect, FrameRect, InvalidateRect, SetCapture, ReleaseCapture, GetCursorPos, PostMessageW, WM_CLOSE, WM_KEYDOWN, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_LBUTTONUP, WM_PAINT, WM_DESTROY, VK_ESCAPE, BeginPaint, EndPaint, PAINTSTRUCT, GetMessageW, TranslateMessage, DispatchMessageW, MSG, DefWindowProcW, PostQuitMessage, WS_EX_LAYERED, WS_EX_TOPMOST, WS_EX_TOOLWINDOW, WS_POPUP, WS_VISIBLE, DrawTextW, DT_CENTER, DT_VCENTER, GetClientRect, GetWindowTextLengthW, GetWindowTextW, DT_WORDBREAK, SetTimer, KillTimer, WM_TIMER, GetDC, ReleaseDC, DT_CALCRECT, SetCursor, WM_SETCURSOR, TrackMouseEvent, TRACKMOUSEEVENT, TME_LEAVE, WM_MOUSELEAVE, GetWindowRect, RedrawWindow, RDW_INVALIDATE, RDW_UPDATENOW};
-use winapi::um::wingdi::{CreateCompatibleDC, CreateCompatibleBitmap, SelectObject, DeleteObject, DeleteDC, BitBlt, SRCCOPY, CreateSolidBrush, SetTextColor, CreateFontW, SetBkMode, CreateRoundRectRgn, AddFontMemResourceEx, FrameRgn, FillRgn};
-use winapi::um::winuser::{MoveWindow};
+use winapi::um::winuser::{
+    GetSystemMetrics, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SM_CXVIRTUALSCREEN,
+    SM_CYVIRTUALSCREEN, CreateWindowExW, RegisterClassW, WNDCLASSW, UnregisterClassW,
+    SetLayeredWindowAttributes, LWA_ALPHA, LWA_COLORKEY, LoadCursorW, IDC_CROSS, IDC_HAND, FillRect,
+    FrameRect, InvalidateRect, SetCapture, ReleaseCapture, GetCursorPos, PostMessageW,
+    WM_CLOSE, WM_KEYDOWN, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_LBUTTONUP, WM_PAINT,
+    WM_DESTROY, VK_ESCAPE, BeginPaint, EndPaint, PAINTSTRUCT, GetMessageW,
+    TranslateMessage, DispatchMessageW, MSG, DefWindowProcW, PostQuitMessage,
+    WS_EX_LAYERED, WS_EX_TOPMOST, WS_EX_TOOLWINDOW, WS_POPUP, WS_VISIBLE, DrawTextW,
+    DT_CENTER, DT_VCENTER, GetClientRect, GetWindowTextLengthW, GetWindowTextW,
+    DT_WORDBREAK, SetTimer, KillTimer, WM_TIMER, GetDC, ReleaseDC, DT_CALCRECT,
+    SetCursor, WM_SETCURSOR, TrackMouseEvent, TRACKMOUSEEVENT, TME_LEAVE, WM_MOUSELEAVE,
+    GetWindowRect
+};
+use winapi::um::wingdi::{
+    CreateCompatibleDC, CreateCompatibleBitmap, SelectObject, DeleteObject, DeleteDC,
+    BitBlt, SRCCOPY, CreateSolidBrush, SetTextColor, CreateFontW, SetBkMode,
+    CreateRoundRectRgn, AddFontMemResourceEx, FrameRgn, FillRgn
+};
+use winapi::um::winuser::MoveWindow;
 use std::sync::Mutex;
 use winapi::um::libloaderapi::GetModuleHandleW;
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::collections::HashMap;
 use std::sync::OnceLock;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config;
 
+// --- PARTICLE SYSTEM STRUCTS ---
+#[derive(Clone, Copy)]
+struct Particle {
+    x: f32,
+    y: f32,
+    vx: f32,
+    vy: f32,
+    size: i32,
+    color: u32, // 0x00bbggrr
+}
+
+// Store animation state per window
+static ANIMATION_MAP: OnceLock<Mutex<HashMap<usize, Vec<Particle>>>> = OnceLock::new();
+// -------------------------------
+
 fn to_wide(s: &str) -> Vec<u16> {
     OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+}
+
+fn simple_rng(seed: &mut u32) -> u32 {
+    *seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+    (*seed / 65536) % 32768
+}
+
+fn get_random_f32(seed: &mut u32, min: f32, max: f32) -> f32 {
+    let r = simple_rng(seed) as f32 / 32768.0;
+    min + r * (max - min)
 }
 
 static mut START_POS: POINT = POINT { x: 0, y: 0 };
@@ -75,7 +118,6 @@ unsafe extern "system" fn selection_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARA
             0
         }
         WM_TIMER => {
-            // Remove from list
             {
                 let mut list = OVERLAY_LIST.lock().unwrap();
                 list.retain(|&h| h != hwnd as usize);
@@ -193,7 +235,8 @@ pub fn show_result_window(target_rect: RECT, text: String, duration_ms: u32) {
         wc.lpfnWndProc = Some(result_wnd_proc);
         wc.hInstance = instance;
         wc.lpszClassName = class_name.as_ptr();
-        wc.hbrBackground = CreateSolidBrush(0x00000000);
+        // Use Magenta as background brush, this will be keyed out to transparent
+        wc.hbrBackground = CreateSolidBrush(0x00FF00FF); 
         RegisterClassW(&wc);
 
         let region_width = (target_rect.right - target_rect.left).abs();
@@ -203,11 +246,14 @@ pub fn show_result_window(target_rect: RECT, text: String, duration_ms: u32) {
         let font_size = 20;
         let hfont = CreateFontW(font_size, 0, 0, 0, 400, 0, 0, 0, 0, 0, 0, 2, 0, to_wide("Roboto").as_ptr());
         SelectObject(hdc_screen, hfont as *mut winapi::ctypes::c_void);
-        let padding = 4;
+        
+        let padding = 8; // Slightly larger padding for aesthetics
         let max_text_width = region_width - padding * 2;
         let mut text_rect = RECT { left: 0, top: 0, right: max_text_width, bottom: 0 };
         let wide_text = to_wide(&text);
+        
         DrawTextW(hdc_screen, wide_text.as_ptr(), -1, &mut text_rect, DT_CALCRECT | DT_WORDBREAK);
+        
         let text_height = text_rect.bottom - text_rect.top;
         DeleteObject(hfont as *mut winapi::ctypes::c_void);
         ReleaseDC(std::ptr::null_mut(), hdc_screen);
@@ -216,12 +262,12 @@ pub fn show_result_window(target_rect: RECT, text: String, duration_ms: u32) {
 
         let x = target_rect.left;
         let width = region_width as i32;
-        let mut y = target_rect.top - height - 10; // A little above
+        let mut y = target_rect.top - height - 10; 
         if y < 0 {
-            y = target_rect.top + 10; // Below if above is off-screen
+            y = target_rect.top + 10; 
         }
 
-        // Push existing overlays up
+        // Move existing windows
         {
             let list = OVERLAY_LIST.lock().unwrap();
             for &hwnd_usize in list.iter() {
@@ -232,7 +278,6 @@ pub fn show_result_window(target_rect: RECT, text: String, duration_ms: u32) {
             }
         }
 
-        // Load Roboto font
         let font_data = include_bytes!("roboto.ttf");
         let _font_handle = AddFontMemResourceEx(font_data.as_ptr() as *mut winapi::ctypes::c_void, font_data.len() as u32, std::ptr::null_mut(), &mut 0);
 
@@ -248,15 +293,15 @@ pub fn show_result_window(target_rect: RECT, text: String, duration_ms: u32) {
             std::ptr::null_mut()
         );
 
-        // Add to list
         {
             let mut list = OVERLAY_LIST.lock().unwrap();
             list.push(hwnd as usize);
         }
 
-        SetLayeredWindowAttributes(hwnd, 0, 220, LWA_ALPHA);
+        // Key out Magenta (0x00FF00FF) so it is fully transparent
+        // Keep everything else at 220 Alpha
+        SetLayeredWindowAttributes(hwnd, 0x00FF00FF, 220, LWA_ALPHA | LWA_COLORKEY);
         SetTimer(hwnd, 1, duration_ms, None);
-        // Removed Timer 2 (polling) in favor of event-driven tracking
 
         let mut msg: MSG = unsafe { std::mem::zeroed() };
         while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) != 0 {
@@ -272,7 +317,46 @@ pub fn show_result_window(target_rect: RECT, text: String, duration_ms: u32) {
 unsafe extern "system" fn result_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WM_LBUTTONUP => {
-            PostMessageW(hwnd, WM_CLOSE, 0, 0);
+            let mut rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+            GetClientRect(hwnd, &mut rect);
+            let w = rect.right;
+            let h = rect.bottom;
+
+            let mut particles = Vec::new();
+            let mut seed = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().subsec_nanos();
+            
+            // Generate ~150 fragments for a solid "break" effect
+            for _ in 0..150 {
+                let px = get_random_f32(&mut seed, 0.0, w as f32);
+                let py = get_random_f32(&mut seed, 0.0, h as f32);
+                let vx = get_random_f32(&mut seed, -8.0, 8.0);
+                let vy = get_random_f32(&mut seed, -8.0, 5.0); 
+                
+                // Determine color (0x00bbggrr)
+                let roll = simple_rng(&mut seed) % 100;
+                let color = if roll < 80 {
+                    0x00000000 // 80% Black (Background)
+                } else if roll < 90 {
+                    0x0000FF00 // 10% Green (Border)
+                } else {
+                    0x00FFFFFF // 10% White (Text)
+                };
+
+                particles.push(Particle {
+                    x: px, y: py, vx, vy,
+                    size: (simple_rng(&mut seed) % 5 + 2) as i32,
+                    color,
+                });
+            }
+
+            {
+                let map_mutex = ANIMATION_MAP.get_or_init(|| Mutex::new(HashMap::new()));
+                let mut map = map_mutex.lock().unwrap();
+                map.insert(hwnd as usize, particles);
+            }
+
+            KillTimer(hwnd, 1);
+            SetTimer(hwnd, 3, 16, None);
             0
         }
         WM_KEYDOWN => {
@@ -286,42 +370,78 @@ unsafe extern "system" fn result_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, 
             1
         }
         WM_MOUSEMOVE => {
-            let map_mutex = HOVER_MAP.get_or_init(|| Mutex::new(HashMap::new()));
-            let mut map = map_mutex.lock().unwrap();
-            
-            // If we aren't already marked as hovering, start tracking
-            if !*map.get(&(hwnd as usize)).unwrap_or(&false) {
-                map.insert(hwnd as usize, true);
-                
-                // Request notification when mouse leaves the window
-                let mut tme: TRACKMOUSEEVENT = std::mem::zeroed();
-                tme.cbSize = std::mem::size_of::<TRACKMOUSEEVENT>() as u32;
-                tme.dwFlags = TME_LEAVE;
-                tme.hwndTrack = hwnd;
-                tme.dwHoverTime = 0;
-                unsafe { TrackMouseEvent(&mut tme); }
-                
-                // Invalidate only this window to redraw with green border
-                unsafe { InvalidateRect(hwnd, std::ptr::null(), 0); }
+            let is_animating = {
+                let map_mutex = ANIMATION_MAP.get_or_init(|| Mutex::new(HashMap::new()));
+                let map = map_mutex.lock().unwrap();
+                map.contains_key(&(hwnd as usize))
+            };
+
+            if !is_animating {
+                let map_mutex = HOVER_MAP.get_or_init(|| Mutex::new(HashMap::new()));
+                let mut map = map_mutex.lock().unwrap();
+                if !*map.get(&(hwnd as usize)).unwrap_or(&false) {
+                    map.insert(hwnd as usize, true);
+                    let mut tme: TRACKMOUSEEVENT = std::mem::zeroed();
+                    tme.cbSize = std::mem::size_of::<TRACKMOUSEEVENT>() as u32;
+                    tme.dwFlags = TME_LEAVE;
+                    tme.hwndTrack = hwnd;
+                    tme.dwHoverTime = 0;
+                    unsafe { TrackMouseEvent(&mut tme); }
+                    unsafe { InvalidateRect(hwnd, std::ptr::null(), 0); }
+                }
             }
             0
         }
         WM_MOUSELEAVE => {
-            let map_mutex = HOVER_MAP.get_or_init(|| Mutex::new(HashMap::new()));
-            let mut map = map_mutex.lock().unwrap();
-            
-            // Mark as not hovering
-            map.insert(hwnd as usize, false);
-            
-            // Invalidate to redraw without border
-            unsafe { InvalidateRect(hwnd, std::ptr::null(), 0); }
+             let is_animating = {
+                let map_mutex = ANIMATION_MAP.get_or_init(|| Mutex::new(HashMap::new()));
+                let map = map_mutex.lock().unwrap();
+                map.contains_key(&(hwnd as usize))
+            };
+            if !is_animating {
+                let map_mutex = HOVER_MAP.get_or_init(|| Mutex::new(HashMap::new()));
+                let mut map = map_mutex.lock().unwrap();
+                map.insert(hwnd as usize, false);
+                unsafe { InvalidateRect(hwnd, std::ptr::null(), 0); }
+            }
             0
         }
         WM_TIMER => {
-            // Timer 1 is for auto-close
             if wparam == 1 {
                 KillTimer(hwnd, 1);
                 PostMessageW(hwnd, WM_CLOSE, 0, 0);
+            } else if wparam == 3 {
+                let mut should_close = false;
+                {
+                    let map_mutex = ANIMATION_MAP.get_or_init(|| Mutex::new(HashMap::new()));
+                    let mut map = map_mutex.lock().unwrap();
+                    if let Some(particles) = map.get_mut(&(hwnd as usize)) {
+                        let mut visible_count = 0;
+                        let mut rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+                        GetClientRect(hwnd, &mut rect);
+                        
+                        for p in particles.iter_mut() {
+                            p.x += p.vx;
+                            p.y += p.vy;
+                            p.vy += 0.5; // Gravity
+                            if p.y < (rect.bottom + 100) as f32 {
+                                visible_count += 1;
+                            }
+                        }
+                        if visible_count == 0 {
+                            should_close = true;
+                        }
+                    } else {
+                        should_close = true;
+                    }
+                }
+
+                if should_close {
+                    KillTimer(hwnd, 3);
+                    PostMessageW(hwnd, WM_CLOSE, 0, 0);
+                } else {
+                    InvalidateRect(hwnd, std::ptr::null(), 0);
+                }
             }
             0
         }
@@ -331,56 +451,88 @@ unsafe extern "system" fn result_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, 
             let mut rect: RECT = unsafe { std::mem::zeroed() };
             GetClientRect(hwnd, &mut rect);
 
-            // Double Buffering to prevent flicker
             let mem_dc = CreateCompatibleDC(hdc);
             let mem_bitmap = CreateCompatibleBitmap(hdc, rect.right, rect.bottom);
             SelectObject(mem_dc, mem_bitmap as *mut winapi::ctypes::c_void);
 
-            // 1. Clear background (transparent/black)
-            let clear_brush = CreateSolidBrush(0x00000000);
-            FillRect(mem_dc, &rect, clear_brush);
-            DeleteObject(clear_brush as *mut winapi::ctypes::c_void);
+            // 1. Fill with CHROMA KEY (Magenta: 0x00FF00FF)
+            // This color is defined as "Transparent" by SetLayeredWindowAttributes
+            let key_brush = CreateSolidBrush(0x00FF00FF);
+            FillRect(mem_dc, &rect, key_brush);
+            DeleteObject(key_brush as *mut winapi::ctypes::c_void);
 
-            // 2. Draw the main rounded rectangle background (Black)
-            let hrgn = CreateRoundRectRgn(0, 0, rect.right, rect.bottom, 8, 8);
-            let bg_brush = CreateSolidBrush(0x00000000); // Black background
-            FillRgn(mem_dc, hrgn, bg_brush);
-            DeleteObject(bg_brush as *mut winapi::ctypes::c_void);
-
-            // 3. Check Hover State and Draw Green Border
-            {
-                let map_mutex = HOVER_MAP.get_or_init(|| Mutex::new(HashMap::new()));
+            let particles_opt = {
+                let map_mutex = ANIMATION_MAP.get_or_init(|| Mutex::new(HashMap::new()));
                 let map = map_mutex.lock().unwrap();
-                if *map.get(&(hwnd as usize)).unwrap_or(&false) {
-                    let green_brush = CreateSolidBrush(0x0000FF00); // 0x00bbggrr - Green
-                    // Frame the region (draws border)
-                    FrameRgn(mem_dc, hrgn, green_brush, 2, 2);
-                    DeleteObject(green_brush as *mut winapi::ctypes::c_void);
+                map.get(&(hwnd as usize)).cloned()
+            };
+
+            if let Some(particles) = particles_opt {
+                // --- ANIMATION: DRAW BLACK SHARDS ---
+                // We draw on top of Magenta. The Magenta becomes invisible.
+                // The Black particles stay visible.
+                for p in particles {
+                    let p_rect = RECT {
+                        left: p.x as i32,
+                        top: p.y as i32,
+                        right: p.x as i32 + p.size,
+                        bottom: p.y as i32 + p.size
+                    };
+                    let brush = CreateSolidBrush(p.color);
+                    FillRect(mem_dc, &p_rect, brush);
+                    DeleteObject(brush as *mut winapi::ctypes::c_void);
                 }
+            } else {
+                // --- NORMAL UI ---
+                // Draw Black Background on top of Magenta
+                let hrgn = CreateRoundRectRgn(0, 0, rect.right, rect.bottom, 8, 8);
+                let bg_brush = CreateSolidBrush(0x00000000); // Black
+                FillRgn(mem_dc, hrgn, bg_brush);
+                DeleteObject(bg_brush as *mut winapi::ctypes::c_void);
+
+                // Green Border
+                {
+                    let map_mutex = HOVER_MAP.get_or_init(|| Mutex::new(HashMap::new()));
+                    let map = map_mutex.lock().unwrap();
+                    if *map.get(&(hwnd as usize)).unwrap_or(&false) {
+                        let green_brush = CreateSolidBrush(0x0000FF00);
+                        FrameRgn(mem_dc, hrgn, green_brush, 2, 2);
+                        DeleteObject(green_brush as *mut winapi::ctypes::c_void);
+                    }
+                }
+
+                SetBkMode(mem_dc, 1);
+                SetTextColor(mem_dc, 0x00FFFFFF);
+
+                let text_len = GetWindowTextLengthW(hwnd) + 1;
+                let mut buf = vec![0u16; text_len as usize];
+                GetWindowTextW(hwnd, buf.as_mut_ptr(), text_len);
+
+                let font_size = 20;
+                let hfont = CreateFontW(font_size, 0, 0, 0, 400, 0, 0, 0, 0, 0, 0, 2, 0, to_wide("Segoe UI").as_ptr());
+                let old_font = SelectObject(mem_dc, hfont as *mut winapi::ctypes::c_void);
+
+                // --- MANUAL VERTICAL CENTERING ---
+                let mut calc_rect = rect;
+                // Calculate exact height needed for text
+                DrawTextW(mem_dc, buf.as_mut_ptr(), -1, &mut calc_rect, DT_CALCRECT | DT_WORDBREAK);
+                
+                let text_h = calc_rect.bottom - calc_rect.top;
+                let win_h = rect.bottom - rect.top;
+                // Math: (WindowHeight - TextHeight) / 2 = TopMargin
+                let top_margin = (win_h - text_h) / 2;
+                
+                rect.top += top_margin;
+
+                DrawTextW(mem_dc, buf.as_mut_ptr(), -1, &mut rect, DT_CENTER | DT_WORDBREAK);
+
+                SelectObject(mem_dc, old_font);
+                DeleteObject(hfont as *mut winapi::ctypes::c_void);
+                DeleteObject(hrgn as *mut winapi::ctypes::c_void);
             }
 
-            // 4. Draw Text
-            SetBkMode(mem_dc, 1); // Transparent background for text
-            SetTextColor(mem_dc, 0x00FFFFFF); // White text
-
-            let text_len = GetWindowTextLengthW(hwnd) + 1;
-            let mut buf = vec![0u16; text_len as usize];
-            GetWindowTextW(hwnd, buf.as_mut_ptr(), text_len);
-
-            let font_size = 20;
-            let hfont = CreateFontW(font_size, 0, 0, 0, 400, 0, 0, 0, 0, 0, 0, 2, 0, to_wide("Segoe UI").as_ptr());
-            let old_font = SelectObject(mem_dc, hfont as *mut winapi::ctypes::c_void);
-
-            let mut draw_rect = rect;
-            DrawTextW(mem_dc, buf.as_mut_ptr(), -1, &mut draw_rect, DT_CENTER | DT_WORDBREAK | DT_VCENTER);
-
-            // 5. Copy memory buffer to screen
             BitBlt(hdc, 0, 0, rect.right, rect.bottom, mem_dc, 0, 0, SRCCOPY);
 
-            // Cleanup
-            SelectObject(mem_dc, old_font);
-            DeleteObject(hfont as *mut winapi::ctypes::c_void);
-            DeleteObject(hrgn as *mut winapi::ctypes::c_void);
             DeleteObject(mem_bitmap as *mut winapi::ctypes::c_void);
             DeleteDC(mem_dc);
 
@@ -388,11 +540,16 @@ unsafe extern "system" fn result_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, 
             0
         }
         WM_DESTROY => {
-            // Clean up map entry
-            let map_mutex = HOVER_MAP.get_or_init(|| Mutex::new(HashMap::new()));
-            let mut map = map_mutex.lock().unwrap();
-            map.remove(&(hwnd as usize));
-            
+            {
+                let map_mutex = HOVER_MAP.get_or_init(|| Mutex::new(HashMap::new()));
+                let mut map = map_mutex.lock().unwrap();
+                map.remove(&(hwnd as usize));
+            }
+            {
+                let anim_mutex = ANIMATION_MAP.get_or_init(|| Mutex::new(HashMap::new()));
+                let mut map = anim_mutex.lock().unwrap();
+                map.remove(&(hwnd as usize));
+            }
             PostQuitMessage(0);
             0
         }
