@@ -64,24 +64,18 @@ impl MainApp {
     fn configure_style(&self, ctx: &egui::Context) {
         let mut style = (*ctx.style()).clone();
         
-        // 1. Tăng khoảng cách cho thoáng
         style.spacing.item_spacing = egui::vec2(10.0, 10.0);
         style.spacing.window_margin = egui::Margin::same(15.0);
         
-        // 2. Bo tròn các góc
         style.visuals.widgets.noninteractive.rounding = egui::Rounding::same(5.0);
         style.visuals.widgets.inactive.rounding = egui::Rounding::same(5.0);
         style.visuals.widgets.hovered.rounding = egui::Rounding::same(5.0);
         style.visuals.widgets.active.rounding = egui::Rounding::same(5.0);
 
-        // 3. HIGHLIGHT TEXT FIELD: Tạo viền màu cho ô nhập liệu
-        let border_color = egui::Color32::from_rgb(100, 149, 237); // Màu Cornflower Blue (Xanh dịu)
-        
-        // Trạng thái bình thường (Inactive)
+        // HIGHLIGHT TEXT FIELD: Viền màu Cornflower Blue
+        let border_color = egui::Color32::from_rgb(100, 149, 237);
         style.visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, border_color);
-        // Trạng thái khi di chuột vào (Hovered)
         style.visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.5, border_color);
-        // Trạng thái khi đang gõ (Active/Open)
         style.visuals.widgets.active.bg_stroke = egui::Stroke::new(2.0, border_color);
         
         ctx.set_style(style);
@@ -235,16 +229,15 @@ impl eframe::App for MainApp {
 
             egui::ScrollArea::vertical().show(ui, |ui| {
                 
-                // --- KHỐI 1: CẤU HÌNH API (ĐÃ SỬA LAYOUT) ---
+                // --- KHỐI 1: CẤU HÌNH API ---
                 egui::CollapsingHeader::new(egui::RichText::new("🌐 Cấu hình API").strong())
                     .default_open(true)
                     .show(ui, |ui| {
                         egui::Grid::new("api_grid")
                             .num_columns(2)
-                            .spacing([20.0, 15.0]) // Tăng khoảng cách dọc
+                            .spacing([20.0, 15.0])
                             .striped(true)
                             .show(ui, |ui| {
-                                // Dòng 1: Label Dịch vụ + ComboBox + Nút Hướng dẫn (Bên phải cùng)
                                 ui.label("Dịch vụ:");
                                 ui.horizontal(|ui| {
                                     ui.add_enabled_ui(!self.started, |ui| {
@@ -257,7 +250,6 @@ impl eframe::App for MainApp {
                                             });
                                     });
                                     
-                                    // Đẩy nút Hướng dẫn về phía bên phải cùng
                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                         if ui.add(egui::Button::new(egui::RichText::new("❓ Hướng dẫn lấy Key").small())).clicked() {
                                             self.show_popup = true;
@@ -267,7 +259,6 @@ impl eframe::App for MainApp {
                                 });
                                 ui.end_row();
 
-                                // Dòng 2: Label API Key + Input Field (Ngang hàng, Full width)
                                 ui.label("API Key:");
                                 let key_ref = if self.selected_api == "gemini" { &mut self.gemini_api_key } else { &mut self.groq_api_key };
                                 ui.add_enabled(!self.started, egui::TextEdit::singleline(key_ref).password(true).desired_width(f32::INFINITY));
@@ -298,7 +289,6 @@ impl eframe::App for MainApp {
                             });
                         });
                         
-                        // Text field này cũng sẽ được highlight nhờ configure_style
                         ui.add_enabled(!self.started, egui::TextEdit::multiline(&mut self.current_prompt).desired_rows(4).desired_width(f32::INFINITY));
                         
                         if self.in_custom_mode {
@@ -367,6 +357,33 @@ impl eframe::App for MainApp {
 
                 // --- LOGIC NÚT ACTION ---
                 ui.vertical_centered(|ui| {
+                    // === NÚT TỰ ĐỘNG CHỌN VÙNG VÀ ẢNH ===
+                    ui.horizontal(|ui| {
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center).with_main_align(egui::Align::Center), |ui| {
+                            if ui.button("🎯 Tự động chọn vùng WWM").clicked() {
+                                // Tọa độ: Top-Left(308, 919), Bottom-Right(1621, 1054)
+                                // Width = 1621 - 308 = 1313
+                                // Height = 1054 - 919 = 135
+                                let region = config::Region {
+                                    x: 308,
+                                    y: 919,
+                                    width: 1313,
+                                    height: 135,
+                                };
+                                self.config.fixed_regions.clear();
+                                self.config.fixed_regions.push(region);
+                                self.config.save().unwrap();
+                            }
+                            ui.label(egui::RichText::new("(Dành cho màn 16:9 như ảnh)").italics().color(egui::Color32::GRAY));
+                            
+                            if ui.button("🖼️ Ảnh").clicked() {
+                                // Chức năng sẽ thêm sau
+                            }
+                        });
+                    });
+                    ui.add_space(10.0);
+                    // =========================================
+
                     if !self.started {
                         let start_btn = egui::Button::new(egui::RichText::new("🚀 BẮT ĐẦU SỬ DỤNG").size(20.0).strong().color(egui::Color32::WHITE))
                             .min_size(egui::vec2(200.0, 50.0))
@@ -449,7 +466,7 @@ impl eframe::App for MainApp {
 fn main() -> Result<(), eframe::Error> {
     let mut options = eframe::NativeOptions::default();
     options.viewport.transparent = Some(false);
-    options.viewport.inner_size = Some(egui::vec2(900.0, 800.0));
+    options.viewport.inner_size = Some(egui::vec2(900.0, 900.0));
     options.viewport.taskbar = Some(true);
     eframe::run_native(
         "Screen Translator",
