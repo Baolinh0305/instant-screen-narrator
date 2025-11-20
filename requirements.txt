@@ -1,9 +1,0 @@
-pytesseract
-google-generativeai
-gtts
-pillow
-pyautogui
-keyboard
-playsound==1.2.2
-tkinter
-groq
