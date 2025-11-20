@@ -142,12 +142,12 @@ impl eframe::App for MainApp {
             });
             egui::Frame::group(ui.style()).show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.add_enabled(!self.started, egui::Checkbox::new(&mut self.config.split_tts, "Split TTS"));
-                    ui.label("Bắt buộc chọn, chia đoạn văn ra thành từng phần nhỏ để chuyển thành giọng nói rồi ghép lại");
-                });
-                ui.horizontal(|ui| {
                     ui.add_enabled(!self.started, egui::Checkbox::new(&mut self.use_tts, "Use TTS"));
                     ui.label("Đọc văn bản");
+                });
+                ui.horizontal(|ui| {
+                    ui.add_enabled(!self.started && self.use_tts, egui::Checkbox::new(&mut self.config.split_tts, "Split TTS"));
+                    ui.label("Bắt buộc chọn, chia đoạn văn ra thành từng phần nhỏ để chuyển thành giọng nói rồi ghép lại");
                 });
                 ui.horizontal(|ui| {
                     ui.add_enabled(false, egui::Checkbox::new(&mut self.config.show_overlay, egui::RichText::new("Hiển thị văn bản dịch trên vùng dịch (chưa làm)").color(egui::Color32::GRAY)));
