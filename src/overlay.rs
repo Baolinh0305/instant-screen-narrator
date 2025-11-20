@@ -15,11 +15,9 @@ fn to_wide(s: &str) -> Vec<u16> {
 static mut START_POS: POINT = POINT { x: 0, y: 0 };
 static mut CURR_POS: POINT = POINT { x: 0, y: 0 };
 static mut IS_DRAGGING: bool = false;
-static mut MODE: bool = false;
 
 pub fn show_selection_overlay() {
     unsafe {
-        MODE = std::fs::metadata("overlay.txt").is_ok();
         let instance = GetModuleHandleW(std::ptr::null());
         let class_name = to_wide("SnippingOverlay");
 
@@ -75,18 +73,12 @@ unsafe extern "system" fn selection_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARA
             0
         }
         WM_LBUTTONDOWN => {
-            if MODE {
-                let _ = std::fs::remove_file("overlay.txt");
-                PostMessageW(hwnd, WM_CLOSE, 0, 0);
-                0
-            } else {
-                IS_DRAGGING = true;
-                GetCursorPos(std::ptr::addr_of_mut!(START_POS));
-                CURR_POS = START_POS;
-                SetCapture(hwnd);
-                InvalidateRect(hwnd, std::ptr::null(), 0);
-                0
-            }
+            IS_DRAGGING = true;
+            GetCursorPos(std::ptr::addr_of_mut!(START_POS));
+            CURR_POS = START_POS;
+            SetCapture(hwnd);
+            InvalidateRect(hwnd, std::ptr::null(), 0);
+            0
         }
         WM_MOUSEMOVE => {
             if IS_DRAGGING {
@@ -140,17 +132,7 @@ unsafe extern "system" fn selection_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARA
             FillRect(mem_dc, &full_rect, brush);
             DeleteObject(brush as *mut winapi::ctypes::c_void);
 
-            if MODE {
-                if let Ok(text) = std::fs::read_to_string("overlay.txt") {
-                    let text_wide = to_wide(&text);
-                    let mut rect = RECT { left: 100, top: 100, right: 800, bottom: 300 };
-                    let bg_brush = CreateSolidBrush(0x00FFFFFF);
-                    FillRect(mem_dc, &rect, bg_brush);
-                    DeleteObject(bg_brush as *mut winapi::ctypes::c_void);
-                    SetTextColor(mem_dc, 0x00000000);
-                    DrawTextW(mem_dc, text_wide.as_ptr(), -1, &mut rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-                }
-            } else if IS_DRAGGING {
+            if IS_DRAGGING {
                 let rect = RECT {
                     left: (START_POS.x.min(CURR_POS.x)) - GetSystemMetrics(SM_XVIRTUALSCREEN),
                     top: (START_POS.y.min(CURR_POS.y)) - GetSystemMetrics(SM_YVIRTUALSCREEN),

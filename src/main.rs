@@ -1,3 +1,5 @@
+#![windows_subsystem = "windows"]
+
 mod config;
 mod capture;
 mod translation;
@@ -236,14 +238,9 @@ impl MainApp {
                             let rt = tokio::runtime::Runtime::new().unwrap();
                             rt.block_on(async {
                                 let mut text = String::new();
-                                let mut first = true;
                                 for region in &regions {
                                     let image_bytes = capture::capture_image(region).unwrap_or_default();
                                     if !image_bytes.is_empty() {
-                                        if first {
-                                            let _ = std::fs::write("captured.png", &image_bytes);
-                                            first = false;
-                                        }
                                         let api_key = if selected_api == "gemini" { &gemini_key } else { &groq_key };
                                         if !api_key.is_empty() {
                                             match translation::translate_from_image(&selected_api, api_key, &prompt, &image_bytes).await {
@@ -261,10 +258,8 @@ impl MainApp {
                                     }
                                 }
                                 if !text.is_empty() {
-                                    println!("{}", text);
                                     let _ = tx.send((text.clone(), split_tts, config.speed, config.use_tts));
                                     if config.show_overlay {
-                                        let _ = std::fs::write("overlay.txt", &text);
                                         if let Some(region) = regions.first() {
                                             let rect = RECT {
                                                 left: region.x,
@@ -288,7 +283,6 @@ impl MainApp {
                             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
                             if now - LAST_SELECT.load(Ordering::Relaxed) > 1000 {
                                 LAST_SELECT.store(now, Ordering::Relaxed);
-                                let _ = std::fs::remove_file("overlay.txt");
                                 OVERLAY_ACTIVE.store(true, Ordering::Relaxed);
                                 std::thread::spawn(|| {
                                     overlay::show_selection_overlay();
@@ -297,49 +291,50 @@ impl MainApp {
                             }
                         }
                     } else if event.name.as_ref() == Some(&config.hotkey_instant) {
-                        if !OVERLAY_ACTIVE.load(Ordering::Relaxed) {
-                            OVERLAY_ACTIVE.store(true, Ordering::Relaxed);
-                            std::thread::spawn(|| {
-                                overlay::show_selection_overlay();
-                                OVERLAY_ACTIVE.store(false, Ordering::Relaxed);
-                                let config = config::Config::load();
-                                if let Some(region) = config.fixed_regions.last() {
-                                    let image_bytes = capture::capture_image(region).unwrap_or_default();
-                                    if !image_bytes.is_empty() {
-                                        let api_key = if config.selected_api == "gemini" { &config.gemini_api_key } else { &config.groq_api_key };
-                                        if !api_key.is_empty() {
-                                            let rt = tokio::runtime::Runtime::new().unwrap();
-                                            rt.block_on(async {
-                                                match translation::translate_from_image(&config.selected_api, api_key, &config.current_prompt, &image_bytes).await {
-                                                    Ok(translated) => {
-                                                        println!("{}", translated);
-                                                        let _ = tts::speak(&translated, config.split_tts, config.speed, config.use_tts).await;
-                                                        if config.show_overlay {
-                                                            let rect = RECT {
-                                                                left: region.x,
-                                                                top: region.y,
-                                                                right: region.x + region.width as i32,
-                                                                bottom: region.y + region.height as i32,
-                                                            };
-                                                            let char_count = translated.chars().count();
-                                                            let duration_sec = char_count as f32 / 10.0;
-                                                            let duration_ms = (duration_sec * 1000.0) as u32;
-                                                            std::thread::spawn(move || {
-                                                                show_result_window(rect, translated.clone(), duration_ms);
-                                                            });
-                                                        }
-                                                    }
-                                                    Err(_) => {
-                                                        println!("Translation error");
-                                                    }
-                                                }
-                                            });
-                                        }
-                                    }
-                                }
-                            });
-                        }
-                    }
+                       if !OVERLAY_ACTIVE.load(Ordering::Relaxed) {
+                           OVERLAY_ACTIVE.store(true, Ordering::Relaxed);
+                           let tx_for_thread = tx_clone.clone();
+                           std::thread::spawn(move || {
+                               overlay::show_selection_overlay();
+                               OVERLAY_ACTIVE.store(false, Ordering::Relaxed);
+                               let config = config::Config::load();
+                               if let Some(region) = config.fixed_regions.last() {
+                                   let image_bytes = capture::capture_image(region).unwrap_or_default();
+                                   if !image_bytes.is_empty() {
+                                       let api_key = if config.selected_api == "gemini" { &config.gemini_api_key } else { &config.groq_api_key };
+                                       if !api_key.is_empty() {
+                                           let rt = tokio::runtime::Runtime::new().unwrap();
+                                           rt.block_on(async {
+                                               match translation::translate_from_image(&config.selected_api, api_key, &config.current_prompt, &image_bytes).await {
+                                                   Ok(translated) => {
+                                                       let tx = tx_for_thread.clone();
+                                                       let _ = tx.send((translated.clone(), config.split_tts, config.speed, config.use_tts));
+                                                       if config.show_overlay {
+                                                           let rect = RECT {
+                                                               left: region.x,
+                                                               top: region.y,
+                                                               right: region.x + region.width as i32,
+                                                               bottom: region.y + region.height as i32,
+                                                           };
+                                                           let char_count = translated.chars().count();
+                                                           let duration_sec = char_count as f32 / 10.0;
+                                                           let duration_ms = (duration_sec * 1000.0) as u32;
+                                                           std::thread::spawn(move || {
+                                                               show_result_window(rect, translated.clone(), duration_ms);
+                                                           });
+                                                       }
+                                                   }
+                                                   Err(_) => {
+                                                       println!("Translation error");
+                                                   }
+                                               }
+                                           });
+                                       }
+                                   }
+                               }
+                           });
+                       }
+                   }
                 }
             };
             if let Err(error) = listen(callback) {
