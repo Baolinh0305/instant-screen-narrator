@@ -1,7 +1,7 @@
 use winapi::shared::windef::{POINT, RECT, HWND};
 use winapi::shared::minwindef::{WPARAM, LPARAM, LRESULT};
-use winapi::um::winuser::{GetSystemMetrics, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, CreateWindowExW, RegisterClassW, WNDCLASSW, UnregisterClassW, SetLayeredWindowAttributes, LWA_ALPHA, LoadCursorW, IDC_CROSS, FillRect, FrameRect, InvalidateRect, SetCapture, ReleaseCapture, GetCursorPos, PostMessageW, WM_CLOSE, WM_KEYDOWN, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_LBUTTONUP, WM_PAINT, WM_DESTROY, VK_ESCAPE, BeginPaint, EndPaint, PAINTSTRUCT, GetMessageW, TranslateMessage, DispatchMessageW, MSG, DefWindowProcW, PostQuitMessage, WS_EX_LAYERED, WS_EX_TOPMOST, WS_EX_TOOLWINDOW, WS_POPUP, WS_VISIBLE, DrawTextW, DT_CENTER, DT_VCENTER, DT_SINGLELINE};
-use winapi::um::wingdi::{CreateCompatibleDC, CreateCompatibleBitmap, SelectObject, DeleteObject, DeleteDC, BitBlt, SRCCOPY, CreateSolidBrush, SetTextColor};
+use winapi::um::winuser::{GetSystemMetrics, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, CreateWindowExW, RegisterClassW, WNDCLASSW, UnregisterClassW, SetLayeredWindowAttributes, LWA_ALPHA, LoadCursorW, IDC_CROSS, FillRect, FrameRect, InvalidateRect, SetCapture, ReleaseCapture, GetCursorPos, PostMessageW, WM_CLOSE, WM_KEYDOWN, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_LBUTTONUP, WM_PAINT, WM_DESTROY, VK_ESCAPE, BeginPaint, EndPaint, PAINTSTRUCT, GetMessageW, TranslateMessage, DispatchMessageW, MSG, DefWindowProcW, PostQuitMessage, WS_EX_LAYERED, WS_EX_TOPMOST, WS_EX_TOOLWINDOW, WS_POPUP, WS_VISIBLE, DrawTextW, DT_CENTER, DT_VCENTER, DT_SINGLELINE, GetClientRect, GetWindowTextLengthW, GetWindowTextW, DT_LEFT, DT_WORDBREAK, SetTimer, KillTimer, WM_TIMER};
+use winapi::um::wingdi::{CreateCompatibleDC, CreateCompatibleBitmap, SelectObject, DeleteObject, DeleteDC, BitBlt, SRCCOPY, CreateSolidBrush, SetTextColor, TRANSPARENT, CreateFontW, SetBkMode};
 use winapi::um::libloaderapi::GetModuleHandleW;
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
@@ -67,6 +67,11 @@ unsafe extern "system" fn selection_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARA
             if wparam == VK_ESCAPE as usize {
                 PostMessageW(hwnd, WM_CLOSE, 0, 0);
             }
+            0
+        }
+        WM_TIMER => {
+            KillTimer(hwnd, 1);
+            PostMessageW(hwnd, WM_CLOSE, 0, 0);
             0
         }
         WM_LBUTTONDOWN => {
@@ -177,4 +182,116 @@ fn process_region(region: config::Region) {
     config.fixed_regions.clear();
     config.fixed_regions.push(region);
     config.save().unwrap();
+}
+
+pub fn show_result_window(target_rect: RECT, text: String, duration_ms: u32) {
+    unsafe {
+        let instance = GetModuleHandleW(std::ptr::null());
+        let class_name = to_wide("TranslationResult");
+
+        let mut wc: WNDCLASSW = unsafe { std::mem::zeroed() };
+        wc.lpfnWndProc = Some(result_wnd_proc);
+        wc.hInstance = instance;
+        wc.lpszClassName = class_name.as_ptr();
+        wc.hbrBackground = CreateSolidBrush(0x00000000);
+        RegisterClassW(&wc);
+
+        let width = (target_rect.right - target_rect.left).abs();
+        let height = (target_rect.bottom - target_rect.top).abs();
+
+        let mut y = target_rect.top - height;
+        if y < 0 {
+            y = target_rect.top;
+        }
+
+        let hwnd = CreateWindowExW(
+            WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TOOLWINDOW,
+            class_name.as_ptr(),
+            to_wide(&text).as_ptr(),
+            WS_POPUP | WS_VISIBLE,
+            target_rect.left, y, width, height,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            instance,
+            std::ptr::null_mut()
+        );
+
+        SetLayeredWindowAttributes(hwnd, 0, 220, LWA_ALPHA);
+        SetTimer(hwnd, 1, duration_ms, None);
+
+        let mut msg: MSG = unsafe { std::mem::zeroed() };
+        while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) != 0 {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+            if msg.message == WM_CLOSE { break; }
+        }
+
+        UnregisterClassW(class_name.as_ptr(), instance);
+    }
+}
+
+unsafe extern "system" fn result_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    match msg {
+        WM_LBUTTONUP => {
+            PostMessageW(hwnd, WM_CLOSE, 0, 0);
+            0
+        }
+        WM_KEYDOWN => {
+            if wparam == VK_ESCAPE as usize {
+                PostMessageW(hwnd, WM_CLOSE, 0, 0);
+            }
+            0
+        }
+        WM_MOUSEMOVE => 0,
+        WM_TIMER => {
+            KillTimer(hwnd, 1);
+            PostMessageW(hwnd, WM_CLOSE, 0, 0);
+            0
+        }
+        WM_PAINT => {
+            let mut ps: PAINTSTRUCT = unsafe { std::mem::zeroed() };
+            let hdc = BeginPaint(hwnd, &mut ps);
+            let mut rect: RECT = unsafe { std::mem::zeroed() };
+            GetClientRect(hwnd, &mut rect);
+
+            // Paint dark background
+            let dark_brush = CreateSolidBrush(0x00222222);
+            FillRect(hdc, &rect, dark_brush);
+            DeleteObject(dark_brush as *mut winapi::ctypes::c_void);
+
+            SetBkMode(hdc, 1);
+            SetTextColor(hdc, 0x00FFFFFF);
+
+            let text_len = GetWindowTextLengthW(hwnd) + 1;
+            let mut buf = vec![0u16; text_len as usize];
+            GetWindowTextW(hwnd, buf.as_mut_ptr(), text_len);
+
+            let padding = 4;
+            let width = rect.right - rect.left;
+            let height = rect.bottom - rect.top;
+            let available_w = (width - (padding * 2)).max(1);
+            let available_h = (height - (padding * 2)).max(1);
+
+            // Simple font size calculation
+            let font_size = 20; // Fixed size for simplicity
+            let hfont = CreateFontW(font_size, 0, 0, 0, 400, 0, 0, 0, 0, 0, 0, 2, 0, to_wide("Segoe UI").as_ptr());
+            SelectObject(hdc, hfont as *mut winapi::ctypes::c_void);
+
+            let mut draw_rect = rect;
+            draw_rect.left += padding;
+            draw_rect.right -= padding;
+            draw_rect.top += padding;
+
+            DrawTextW(hdc, buf.as_mut_ptr(), -1, &mut draw_rect, DT_LEFT | DT_WORDBREAK);
+
+            DeleteObject(hfont as *mut winapi::ctypes::c_void);
+            EndPaint(hwnd, &mut ps);
+            0
+        }
+        WM_DESTROY => {
+            PostQuitMessage(0);
+            0
+        }
+        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
 }

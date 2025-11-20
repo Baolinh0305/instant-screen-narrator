@@ -4,10 +4,12 @@ mod translation;
 mod tts;
 mod overlay;
 
+use crate::overlay::show_result_window;
 use eframe::egui;
 
 use rdev::{listen, Event, EventType};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use winapi::shared::windef::RECT;
 
 static LAST_SELECT: AtomicU64 = AtomicU64::new(0);
 static OVERLAY_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -92,12 +94,12 @@ impl eframe::App for MainApp {
                 if self.selected_api == "gemini" {
                     ui.horizontal(|ui| {
                         ui.label("Nhập Gemini api key:");
-                        ui.add_enabled(!self.started, egui::TextEdit::singleline(&mut self.gemini_api_key));
+                        ui.add_enabled(!self.started, egui::TextEdit::singleline(&mut self.gemini_api_key).password(true));
                     });
                 } else {
                     ui.horizontal(|ui| {
                         ui.label("Nhập Groq api key:");
-                        ui.add_enabled(!self.started, egui::TextEdit::singleline(&mut self.groq_api_key));
+                        ui.add_enabled(!self.started, egui::TextEdit::singleline(&mut self.groq_api_key).password(true));
                     });
                 }
             });
@@ -150,7 +152,7 @@ impl eframe::App for MainApp {
                     ui.label("Bắt buộc chọn, chia đoạn văn ra thành từng phần nhỏ để chuyển thành giọng nói rồi ghép lại");
                 });
                 ui.horizontal(|ui| {
-                    ui.add_enabled(false, egui::Checkbox::new(&mut self.config.show_overlay, egui::RichText::new("Hiển thị văn bản dịch trên vùng dịch (chưa làm)").color(egui::Color32::GRAY)));
+                    ui.add_enabled(!self.started, egui::Checkbox::new(&mut self.config.show_overlay, "Hiển thị văn bản dịch trên vùng dịch"));
                 });
                 ui.add_enabled(!self.started, egui::Slider::new(&mut self.config.speed, 0.0..=2.0).text("Tốc độ đọc"));
             });
@@ -263,6 +265,20 @@ impl MainApp {
                                     let _ = tx.send((text.clone(), split_tts, config.speed, config.use_tts));
                                     if config.show_overlay {
                                         let _ = std::fs::write("overlay.txt", &text);
+                                        if let Some(region) = regions.first() {
+                                            let rect = RECT {
+                                                left: region.x,
+                                                top: region.y,
+                                                right: region.x + region.width as i32,
+                                                bottom: region.y + region.height as i32,
+                                            };
+                                            let char_count = text.chars().count();
+                                            let duration_sec = char_count as f32 / 10.0;
+                                            let duration_ms = (duration_sec * 1000.0) as u32;
+                                            std::thread::spawn(move || {
+                                                show_result_window(rect, text.clone(), duration_ms);
+                                            });
+                                        }
                                     }
                                 }
                             });
@@ -298,6 +314,20 @@ impl MainApp {
                                                     Ok(translated) => {
                                                         println!("{}", translated);
                                                         let _ = tts::speak(&translated, config.split_tts, config.speed, config.use_tts).await;
+                                                        if config.show_overlay {
+                                                            let rect = RECT {
+                                                                left: region.x,
+                                                                top: region.y,
+                                                                right: region.x + region.width as i32,
+                                                                bottom: region.y + region.height as i32,
+                                                            };
+                                                            let char_count = translated.chars().count();
+                                                            let duration_sec = char_count as f32 / 10.0;
+                                                            let duration_ms = (duration_sec * 1000.0) as u32;
+                                                            std::thread::spawn(move || {
+                                                                show_result_window(rect, translated.clone(), duration_ms);
+                                                            });
+                                                        }
                                                     }
                                                     Err(_) => {
                                                         println!("Translation error");
@@ -322,7 +352,7 @@ impl MainApp {
 fn main() -> Result<(), eframe::Error> {
     let mut options = eframe::NativeOptions::default();
     options.viewport.transparent = Some(false);
-    options.viewport.inner_size = Some(egui::vec2(800.0, 700.0));
+    options.viewport.inner_size = Some(egui::vec2(800.0, 800.0));
     options.viewport.taskbar = Some(true);
     eframe::run_native(
         "Screen Translator",
