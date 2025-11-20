@@ -5,7 +5,7 @@
 ## Tính năng
 
 - **Dịch màn hình tức thời**: Chụp ảnh vùng màn hình đã chọn và dịch sang tiếng Việt.
-- **Đọc văn bản**: Chuyển văn bản đã dịch thành giọng nói.
+- **Đọc văn bản**: Chuyển văn bản đã dịch thành giọng nói bằng Google TTS.
 - **Hỗ trợ nhiều API**: Gemini (Google) và Groq (nhanh hơn, giới hạn 1000 lần/ngày).
 - **Giao diện đơn giản**: Dễ sử dụng với các tùy chọn cơ bản.
 - **Chạy ẩn**: Ứng dụng chạy ở chế độ cửa sổ trong suốt.
@@ -26,9 +26,10 @@
 2. Chọn API dịch (Groq khuyến nghị vì nhanh).
 3. Nhập API key tương ứng.
 4. Chọn prompt dịch (bình thường hoặc kiểu kiếm hiệp).
-5. Đặt phím tắt (mặc định [ để dịch, ] để chọn vùng).
-6. Nhấn "Bắt đầu".
-7. Sử dụng phím tắt để chọn vùng màn hình và dịch.
+5. Chọn "Use TTS" để bật đọc văn bản bằng Google TTS (cần internet).
+6. Đặt phím tắt (mặc định [ để dịch, ] để chọn vùng, \ để chụp nhanh).
+7. Nhấn "Bắt đầu".
+8. Sử dụng phím tắt để chọn vùng màn hình và dịch.
 
 ## Lưu ý
 

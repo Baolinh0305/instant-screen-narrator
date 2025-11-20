@@ -5,7 +5,15 @@ use regex::Regex;
 use urlencoding;
 use futures::future::join_all;
 
-pub async fn speak(text: &str, split: bool, speed: f32) -> Result<(), anyhow::Error> {
+pub async fn speak(text: &str, split: bool, speed: f32, use_tts: bool) -> Result<(), anyhow::Error> {
+    if use_tts {
+        speak_gtts(text, split, speed).await
+    } else {
+        Ok(())
+    }
+}
+
+async fn speak_gtts(text: &str, split: bool, speed: f32) -> Result<(), anyhow::Error> {
     let parts: Vec<String> = if split {
         let re = Regex::new(r"[,.]")?;
         re.split(text).map(|s| s.to_string()).collect()

@@ -27,6 +27,7 @@ struct MainApp {
     show_popup: bool,
     popup_text: String,
     in_custom_mode: bool,
+    use_tts: bool,
 }
 
 impl Default for MainApp {
@@ -46,6 +47,7 @@ impl Default for MainApp {
             show_popup: false,
             popup_text: String::new(),
             in_custom_mode: false,
+            use_tts: config.use_tts,
         }
     }
 }
@@ -144,6 +146,10 @@ impl eframe::App for MainApp {
                     ui.label("Bắt buộc chọn, chia đoạn văn ra thành từng phần nhỏ để chuyển thành giọng nói rồi ghép lại");
                 });
                 ui.horizontal(|ui| {
+                    ui.add_enabled(!self.started, egui::Checkbox::new(&mut self.use_tts, "Use TTS"));
+                    ui.label("Đọc văn bản");
+                });
+                ui.horizontal(|ui| {
                     ui.add_enabled(false, egui::Checkbox::new(&mut self.config.show_overlay, egui::RichText::new("Hiển thị văn bản dịch trên vùng dịch (chưa làm)").color(egui::Color32::GRAY)));
                 });
                 ui.add_enabled(!self.started, egui::Slider::new(&mut self.config.speed, 0.0..=2.0).text("Tốc độ đọc"));
@@ -157,6 +163,7 @@ impl eframe::App for MainApp {
                 self.config.hotkey_select = self.hotkey_select.clone();
                 self.config.hotkey_instant = self.hotkey_instant.clone();
                 self.config.selected_api = self.selected_api.clone();
+                self.config.use_tts = self.use_tts;
                 self.config.save().unwrap();
 
                 self.start_service();
@@ -199,12 +206,12 @@ impl eframe::App for MainApp {
 impl MainApp {
 
     fn start_service(&mut self) {
-        let (tx, rx) = std::sync::mpsc::channel::<(String, bool, f32)>();
+        let (tx, rx) = std::sync::mpsc::channel::<(String, bool, f32, bool)>();
         std::thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().unwrap();
-            while let Ok((text, split_tts, speed)) = rx.recv() {
+            while let Ok((text, split_tts, speed, use_tts)) = rx.recv() {
                 rt.block_on(async {
-                    if let Err(e) = tts::speak(&text, split_tts, speed).await {
+                    if let Err(e) = tts::speak(&text, split_tts, speed, use_tts).await {
                     }
                 });
             }
@@ -253,7 +260,7 @@ impl MainApp {
                                 }
                                 if !text.is_empty() {
                                     println!("{}", text);
-                                    let _ = tx.send((text.clone(), split_tts, config.speed));
+                                    let _ = tx.send((text.clone(), split_tts, config.speed, config.use_tts));
                                     if config.show_overlay {
                                         let _ = std::fs::write("overlay.txt", &text);
                                     }
@@ -290,7 +297,7 @@ impl MainApp {
                                                 match translation::translate_from_image(&config.selected_api, api_key, &config.current_prompt, &image_bytes).await {
                                                     Ok(translated) => {
                                                         println!("{}", translated);
-                                                        let _ = tts::speak(&translated, config.split_tts, config.speed).await;
+                                                        let _ = tts::speak(&translated, config.split_tts, config.speed, config.use_tts).await;
                                                     }
                                                     Err(_) => {
                                                         println!("Translation error");
