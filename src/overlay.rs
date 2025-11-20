@@ -9,7 +9,7 @@ use winapi::um::winuser::{
     WM_DESTROY, VK_ESCAPE, BeginPaint, EndPaint, PAINTSTRUCT, GetMessageW,
     TranslateMessage, DispatchMessageW, MSG, DefWindowProcW, PostQuitMessage,
     WS_EX_LAYERED, WS_EX_TOPMOST, WS_EX_TOOLWINDOW, WS_POPUP, WS_VISIBLE, DrawTextW,
-    DT_CENTER, DT_VCENTER, GetClientRect, GetWindowTextLengthW, GetWindowTextW,
+    GetClientRect, GetWindowTextLengthW, GetWindowTextW,
     DT_WORDBREAK, SetTimer, KillTimer, WM_TIMER, GetDC, ReleaseDC, DT_CALCRECT,
     SetCursor, WM_SETCURSOR, TrackMouseEvent, TRACKMOUSEEVENT, TME_LEAVE, WM_MOUSELEAVE,
     GetWindowRect, ShowWindow, SW_SHOW, IsWindow // <--- Quan trọng: Thêm IsWindow
