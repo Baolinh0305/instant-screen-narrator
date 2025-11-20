@@ -1,0 +1,20 @@
+Starting Groq image translation request
+Sending request to Groq URL
+Groq Response status: 200 OK
+Groq Extracted text: Bắt đầu nhiệm vụ mới
+Starting Groq image translation request
+Sending request to Groq URL
+Groq Response status: 200 OK
+Groq Extracted text: Để tùy chọn TTS hoạt động tốt hơn, hãy tắt Tách TTS, bao gồm các thay đổi bao gồm thực hiện lớp phủ
+Starting Groq image translation request
+Sending request to Groq URL
+Groq Response status: 200 OK
+Groq Extracted text: Người kể chuyện màn hình tức thời
+Starting Groq image translation request
+Sending request to Groq URL
+Groq Response status: 200 OK
+Groq Extracted text: Tính năng
+Starting Groq image translation request
+Sending request to Groq URL
+Groq Response status: 200 OK
+Groq Extracted text: Mã
