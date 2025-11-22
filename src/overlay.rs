@@ -3,7 +3,7 @@ use winapi::shared::minwindef::{WPARAM, LPARAM, LRESULT};
 use winapi::um::winuser::{
     GetSystemMetrics, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SM_CXVIRTUALSCREEN,
     SM_CYVIRTUALSCREEN, CreateWindowExW, RegisterClassW, WNDCLASSW, UnregisterClassW,
-    SetLayeredWindowAttributes, LWA_ALPHA, LWA_COLORKEY, LoadCursorW, IDC_HAND, FillRect, // Đã thêm IDC_HAND, bỏ IDC_ARROW
+    SetLayeredWindowAttributes, LWA_ALPHA, LWA_COLORKEY, LoadCursorW, IDC_HAND, IDC_ARROW, FillRect, // Thêm IDC_ARROW
     FrameRect, InvalidateRect, SetCapture, ReleaseCapture, GetCursorPos, PostMessageW,
     WM_CLOSE, WM_KEYDOWN, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_LBUTTONUP, WM_PAINT,
     WM_DESTROY, VK_ESCAPE, BeginPaint, EndPaint, PAINTSTRUCT, GetMessageW,
@@ -12,14 +12,15 @@ use winapi::um::winuser::{
     GetClientRect, GetWindowTextLengthW, GetWindowTextW,
     DT_WORDBREAK, SetTimer, KillTimer, WM_TIMER, GetDC, ReleaseDC, DT_CALCRECT,
     SetCursor, WM_SETCURSOR, TrackMouseEvent, TRACKMOUSEEVENT, TME_LEAVE, WM_MOUSELEAVE,
-    GetWindowRect, ShowWindow, SW_SHOW, IsWindow
+    GetWindowRect, ShowWindow, SW_SHOW, IsWindow,
+    WS_EX_NOACTIVATE, UpdateWindow
 };
 use winapi::um::wingdi::{
     CreateCompatibleDC, CreateCompatibleBitmap, SelectObject, DeleteObject, DeleteDC,
     BitBlt, SRCCOPY, CreateSolidBrush, SetTextColor, CreateFontW, SetBkMode,
     CreateRoundRectRgn, AddFontMemResourceEx, FrameRgn, FillRgn,
     GetTextExtentPoint32W, SetTextJustification, TextOutW,
-    MoveToEx, LineTo, CreatePen, PS_SOLID // Bỏ PS_DOT
+    MoveToEx, LineTo, CreatePen, PS_SOLID
 };
 use winapi::um::winuser::MoveWindow;
 use std::sync::Mutex;
@@ -89,7 +90,6 @@ pub fn show_selection_overlay() {
         let mut wc: WNDCLASSW = std::mem::zeroed();
         wc.lpfnWndProc = Some(selection_wnd_proc);
         wc.hInstance = instance;
-        // Không set hCursor ở đây, ta sẽ ẩn nó trong WM_SETCURSOR
         wc.lpszClassName = class_name.as_ptr();
         wc.hbrBackground = CreateSolidBrush(0x00FF00FF); 
         RegisterClassW(&wc);
@@ -103,7 +103,6 @@ pub fn show_selection_overlay() {
         SetLayeredWindowAttributes(hwnd, 0x00FF00FF, 100, LWA_ALPHA | LWA_COLORKEY);
         
         GetCursorPos(std::ptr::addr_of_mut!(CURR_POS));
-        
         ShowWindow(hwnd, SW_SHOW);
 
         let mut msg: MSG = std::mem::zeroed();
@@ -120,11 +119,14 @@ unsafe extern "system" fn selection_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARA
         WM_KEYDOWN => { if wparam == VK_ESCAPE as usize { PostMessageW(hwnd, WM_CLOSE, 0, 0); } 0 }
         WM_LBUTTONDOWN => {
             IS_DRAGGING = true; GetCursorPos(std::ptr::addr_of_mut!(START_POS)); CURR_POS = START_POS;
-            SetCapture(hwnd); InvalidateRect(hwnd, std::ptr::null(), 0); 0
+            SetCapture(hwnd); InvalidateRect(hwnd, std::ptr::null(), 0); 
+            UpdateWindow(hwnd); 
+            0
         }
         WM_MOUSEMOVE => {
             GetCursorPos(std::ptr::addr_of_mut!(CURR_POS));
             InvalidateRect(hwnd, std::ptr::null(), 0); 
+            UpdateWindow(hwnd); 
             0
         }
         WM_LBUTTONUP => {
@@ -139,9 +141,15 @@ unsafe extern "system" fn selection_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARA
             } 0
         }
         WM_SETCURSOR => {
-            // Load IDC_HAND tạm thời hoặc null để ẩn
-            // Ở đây ẩn chuột để hiện crosshair
-            SetCursor(std::ptr::null_mut());
+            // QUAN TRỌNG: Check mode ở đây
+            // Mode 2 (Instant): Hiện con trỏ chuột (IDC_ARROW)
+            // Mode 0, 1: Ẩn con trỏ chuột (null) để hiện crosshair vẽ tay
+            let mode = SELECTION_MODE.load(Ordering::Relaxed);
+            if mode == 2 {
+                SetCursor(LoadCursorW(std::ptr::null_mut(), IDC_ARROW));
+            } else {
+                SetCursor(std::ptr::null_mut());
+            }
             1 
         }
         WM_PAINT => {
@@ -154,6 +162,9 @@ unsafe extern "system" fn selection_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARA
             let mem_bm = CreateCompatibleBitmap(hdc, w, h); SelectObject(mem_dc, mem_bm as *mut winapi::ctypes::c_void);
             let bg_brush = CreateSolidBrush(0x00000000); FillRect(mem_dc, &RECT{left:0,top:0,right:w,bottom:h}, bg_brush); DeleteObject(bg_brush as *mut winapi::ctypes::c_void);
             
+            let mode = SELECTION_MODE.load(Ordering::Relaxed);
+
+            // 1. Vẽ hình chữ nhật vùng chọn (Khi đang kéo chuột) - Áp dụng cho TẤT CẢ các mode
             if IS_DRAGGING {
                 let r = RECT { 
                     left: (START_POS.x.min(CURR_POS.x)) - vx, 
@@ -161,28 +172,29 @@ unsafe extern "system" fn selection_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARA
                     right: (START_POS.x.max(CURR_POS.x)) - vx, 
                     bottom: (START_POS.y.max(CURR_POS.y)) - vy 
                 };
-                let mode = SELECTION_MODE.load(Ordering::Relaxed);
+                
                 let color = if mode == 1 { 0x00FFFF00 } else if mode == 2 { 0x000080FF } else { 0x00FF00FF };
                 let k_br = CreateSolidBrush(color); FillRect(mem_dc, &r, k_br); DeleteObject(k_br as *mut winapi::ctypes::c_void);
                 let b_br = CreateSolidBrush(0x00FFFFFF); FrameRect(mem_dc, &r, b_br); DeleteObject(b_br as *mut winapi::ctypes::c_void);
             }
 
-            // Vẽ Long Crosshair
-            let cx = CURR_POS.x - vx;
-            let cy = CURR_POS.y - vy;
-            
-            // Sửa lỗi: Ép kiểu PS_SOLID sang i32
-            let pen = CreatePen(PS_SOLID as i32, 1, 0x000000FF); 
-            let old_pen = SelectObject(mem_dc, pen as *mut winapi::ctypes::c_void);
+            // 2. Vẽ Long Crosshair (CHỈ VẼ KHI KHÔNG PHẢI MODE 2)
+            if mode != 2 {
+                let cx = CURR_POS.x - vx;
+                let cy = CURR_POS.y - vy;
+                
+                let pen = CreatePen(PS_SOLID.try_into().unwrap(), 2, 0x000000FF); 
+                let old_pen = SelectObject(mem_dc, pen as *mut winapi::ctypes::c_void);
 
-            MoveToEx(mem_dc, 0, cy, std::ptr::null_mut());
-            LineTo(mem_dc, w, cy);
+                MoveToEx(mem_dc, 0, cy, std::ptr::null_mut());
+                LineTo(mem_dc, w, cy);
 
-            MoveToEx(mem_dc, cx, 0, std::ptr::null_mut());
-            LineTo(mem_dc, cx, h);
+                MoveToEx(mem_dc, cx, 0, std::ptr::null_mut());
+                LineTo(mem_dc, cx, h);
 
-            SelectObject(mem_dc, old_pen);
-            DeleteObject(pen as *mut winapi::ctypes::c_void);
+                SelectObject(mem_dc, old_pen);
+                DeleteObject(pen as *mut winapi::ctypes::c_void);
+            }
 
             BitBlt(hdc, 0, 0, w, h, mem_dc, 0, 0, SRCCOPY);
             DeleteObject(mem_bm as *mut winapi::ctypes::c_void); DeleteDC(mem_dc); EndPaint(hwnd, &mut ps); 0
@@ -275,7 +287,12 @@ pub fn show_result_window(target_rect: RECT, text: String, duration_ms: u32) {
         let valid_hwnds: Vec<HWND> = { let mut list = OVERLAY_LIST.lock().unwrap(); list.retain(|&h| IsWindow(h as HWND) != 0); list.iter().map(|&h| h as HWND).collect() };
         for hwnd in valid_hwnds { let mut rect = RECT { left: 0, top: 0, right: 0, bottom: 0 }; if GetWindowRect(hwnd, &mut rect) != 0 { MoveWindow(hwnd, rect.left, rect.top - height - 10, rect.right - rect.left, rect.bottom - rect.top, 1); } }
         let font_data = include_bytes!("roboto.ttf"); let _ = AddFontMemResourceEx(font_data.as_ptr() as *mut winapi::ctypes::c_void, font_data.len() as u32, std::ptr::null_mut(), &mut 0);
-        let hwnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TOOLWINDOW, class_name.as_ptr(), to_wide(&text).as_ptr(), WS_POPUP | WS_VISIBLE, x, y, width, height, std::ptr::null_mut(), std::ptr::null_mut(), instance, std::ptr::null_mut());
+        
+        // Thêm WS_EX_NOACTIVATE để không chiếm focus bàn phím
+        let hwnd = CreateWindowExW(
+            WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, 
+            class_name.as_ptr(), to_wide(&text).as_ptr(), WS_POPUP | WS_VISIBLE, x, y, width, height, std::ptr::null_mut(), std::ptr::null_mut(), instance, std::ptr::null_mut());
+        
         if !hwnd.is_null() { { let mut list = OVERLAY_LIST.lock().unwrap(); list.push(hwnd as usize); } SetLayeredWindowAttributes(hwnd, 0x00FF00FF, 200, LWA_ALPHA | LWA_COLORKEY); SetTimer(hwnd, 1, duration_ms, None); let mut msg: MSG = std::mem::zeroed(); while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) != 0 { TranslateMessage(&msg); DispatchMessageW(&msg); if msg.message == WM_CLOSE { break; } } }
     }
 }
