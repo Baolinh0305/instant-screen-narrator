@@ -1,4 +1,4 @@
-#![windows_subsystem = "windows"] 
+#![windows_subsystem = "windows"] // <--- Đã bỏ comment để ẩn cửa sổ đen
 
 mod config;
 mod capture;
@@ -15,6 +15,7 @@ use winapi::shared::windef::RECT;
 use winapi::um::winuser::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
 use image;
 use std::fs;
+use webbrowser; // Thư viện để mở link
 
 const DEFAULT_ARROW: &[u8] = include_bytes!("arrow.png");
 const AREA_PLACEHOLDER: &[u8] = include_bytes!("area.png");
@@ -343,7 +344,16 @@ impl eframe::App for MainApp {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.vertical_centered(|ui| {
-                ui.heading(egui::RichText::new("Instant Screen Narrator").strong().size(24.0));
+                // === THAY ĐỔI 1: TIÊU ĐỀ VÀ NÚT CREDIT ===
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center).with_main_align(egui::Align::Center), |ui| {
+                        ui.heading(egui::RichText::new("Instant Screen Narrator").strong().size(24.0));
+                        ui.add_space(10.0);
+                        if ui.button(egui::RichText::new("👤 Tạo bởi: Baolinh0305").small()).clicked() {
+                             let _ = webbrowser::open("https://github.com/Baolinh0305/instant-screen-narrator/releases");
+                        }
+                    });
+                });
                 ui.add_space(10.0);
             });
 
@@ -469,7 +479,6 @@ impl eframe::App for MainApp {
                 ui.vertical_centered(|ui| {
                     ui.horizontal(|ui| {
                         ui.with_layout(egui::Layout::left_to_right(egui::Align::Center).with_main_align(egui::Align::Center), |ui| {
-                            // ĐỔI TÊN Ở ĐÂY
                             let mut wwm_text = "🎯 Tự động chọn vùng dịch WWM";
                             if let Some(time) = self.wwm_success_timer {
                                 if time.elapsed().as_secs_f32() < 1.0 { wwm_text = "✅ Đã chọn"; ctx.request_repaint(); } 
@@ -588,7 +597,7 @@ impl eframe::App for MainApp {
                         }
                     }
                     ui.add_space(10.0);
-                    ui.colored_label(egui::Color32::GRAY, "ℹ Chạy Admin nếu muốn dịch game Fullscreen");
+                    // === THAY ĐỔI 2: ĐÃ XÓA DÒNG CẢNH BÁO ADMIN ===
                 });
             });
         });
