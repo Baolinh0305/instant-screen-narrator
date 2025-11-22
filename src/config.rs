@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::path::PathBuf;
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Region {
     pub x: i32,
     pub y: i32,
@@ -12,16 +13,30 @@ pub struct Region {
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Config {
     pub gemini_api_key: String,
-    pub groq_api_key: String,
+    #[serde(default)]
+    pub groq_api_keys: Vec<String>,
+    #[serde(default)]
+    pub active_groq_index: usize,
+
     pub current_prompt: String,
     pub custom_prompt: String,
     pub hotkey_translate: String,
     pub hotkey_select: String,
     pub hotkey_instant: String,
+    pub hotkey_auto: String,
     pub split_tts: bool,
     pub use_tts: bool,
     pub show_overlay: bool,
+    
+    // Vùng cho phím ] (Cố định)
     pub fixed_regions: Vec<Region>,
+    
+    // Vùng cho phím ; (Mũi tên)
+    pub arrow_region: Option<Region>,
+    
+    // Vùng cho phím \ (Tạm thời - Dịch xong quên)
+    pub instant_region: Option<Region>,
+
     pub selected_api: String,
     pub speed: f32,
 }
@@ -30,16 +45,20 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             gemini_api_key: String::new(),
-            groq_api_key: String::new(),
+            groq_api_keys: Vec::new(),
+            active_groq_index: 0,
             current_prompt: Self::get_normal_prompt(),
             custom_prompt: "Phân tích hình ảnh, trả về raw text, không định dạng, thật ngắn gọn".to_string(),
             hotkey_translate: "[".to_string(),
             hotkey_select: "]".to_string(),
             hotkey_instant: "\\".to_string(),
+            hotkey_auto: ";".to_string(),
             split_tts: true,
             use_tts: true,
             show_overlay: false,
             fixed_regions: Vec::new(),
+            arrow_region: None,
+            instant_region: None, // Mặc định None
             selected_api: "groq".to_string(),
             speed: 1.0,
         }
@@ -57,16 +76,30 @@ impl Config {
 }
 
 impl Config {
-    fn get_config_path() -> std::path::PathBuf {
+    pub fn get_config_dir() -> PathBuf {
         let home = std::env::var("USERPROFILE").unwrap_or_else(|_| ".".to_string());
-        std::path::Path::new(&home).join(".screen_translator").join("config.txt")
+        std::path::Path::new(&home).join(".screen_translator")
+    }
+
+    fn get_config_path() -> PathBuf {
+        Self::get_config_dir().join("config.txt")
+    }
+
+    pub fn get_custom_arrow_path() -> PathBuf {
+        Self::get_config_dir().join("custom_arrow.png")
     }
 
     pub fn load() -> Self {
         let path = Self::get_config_path();
         if path.exists() {
             match fs::read_to_string(path) {
-                Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+                Ok(content) => {
+                    let mut config: Config = serde_json::from_str(&content).unwrap_or_default();
+                    if config.active_groq_index >= config.groq_api_keys.len() && !config.groq_api_keys.is_empty() {
+                        config.active_groq_index = 0;
+                    }
+                    config
+                },
                 Err(_) => Self::default(),
             }
         } else {
@@ -82,5 +115,11 @@ impl Config {
         }
         fs::write(path, content)?;
         Ok(())
+    }
+    
+    pub fn get_current_groq_key(&self) -> String {
+        if self.groq_api_keys.is_empty() { return String::new(); }
+        if self.active_groq_index < self.groq_api_keys.len() { self.groq_api_keys[self.active_groq_index].clone() } 
+        else { self.groq_api_keys[0].clone() }
     }
 }

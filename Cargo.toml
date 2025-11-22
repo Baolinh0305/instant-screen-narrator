@@ -22,6 +22,8 @@ urlencoding = "2.1"
 regex = "1.10"
 global-hotkey = "0.5"
 rdev = "0.5"
-winapi = { version = "0.3", features = ["winuser", "libloaderapi", "shellapi"] }
+# QUAN TRỌNG: Đã thêm "wingdi", "windef", "minwindef" để vẽ overlay
+winapi = { version = "0.3", features = ["winuser", "libloaderapi", "shellapi", "wingdi", "windef", "minwindef"] }
 tray-icon = "0.14"
 futures = "0.3"
+rfd = "0.12" # <-- MỚI THÊM: Để mở cửa sổ chọn file ảnh
