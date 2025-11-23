@@ -44,7 +44,8 @@ pub async fn translate_with_gemini_image(api_key: &str, prompt: &str, image_byte
             ],
         }],
     };
-    let url = format!("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={}", api_key);
+    // ĐÃ SỬA LẠI ĐÚNG MODEL BẠN YÊU CẦU: gemini-2.5-flash-lite
+    let url = format!("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key={}", api_key);
     
     let response = client.post(&url).header("Content-Type", "application/json").json(&request).send().await.map_err(|e| TranslationError::Other(e.into()))?;
 
@@ -66,7 +67,7 @@ pub async fn translate_with_groq_image(api_key: &str, prompt: &str, image_bytes:
     let client = reqwest::Client::new();
     let b64 = general_purpose::STANDARD.encode(image_bytes);
     let request = serde_json::json!({
-        "model": "meta-llama/llama-4-scout-17b-16e-instruct", // <-- ĐÃ SỬA LẠI ĐÚNG MODEL CỦA BẠN
+        "model": "meta-llama/llama-4-scout-17b-16e-instruct",
         "messages": [
             {
                 "role": "user",

@@ -10,6 +10,11 @@ pub struct Region {
     pub height: u32,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct CustomPrompt {
+    pub content: String, 
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Config {
     pub gemini_api_key: String,
@@ -19,7 +24,10 @@ pub struct Config {
     pub active_groq_index: usize,
 
     pub current_prompt: String,
-    pub custom_prompt: String,
+    
+    #[serde(default)]
+    pub saved_prompts: Vec<CustomPrompt>, 
+    
     pub hotkey_translate: String,
     pub hotkey_select: String,
     pub hotkey_instant: String,
@@ -28,18 +36,22 @@ pub struct Config {
     pub use_tts: bool,
     pub show_overlay: bool,
     
-    // Vùng cho phím ] (Cố định)
     pub fixed_regions: Vec<Region>,
-    
-    // Vùng cho phím ; (Mũi tên)
     pub arrow_region: Option<Region>,
-    
-    // Vùng cho phím \ (Tạm thời - Dịch xong quên)
     pub instant_region: Option<Region>,
 
     pub selected_api: String,
     pub speed: f32,
+
+    #[serde(default = "default_interval")]
+    pub arrow_check_interval: f32,
+    #[serde(default)]
+    pub auto_copy: bool,
+    #[serde(default)]
+    pub copy_instant_only: bool,
 }
+
+fn default_interval() -> f32 { 0.02 }
 
 impl Default for Config {
     fn default() -> Self {
@@ -48,7 +60,7 @@ impl Default for Config {
             groq_api_keys: Vec::new(),
             active_groq_index: 0,
             current_prompt: Self::get_normal_prompt(),
-            custom_prompt: "Phân tích hình ảnh, trả về raw text, không định dạng, thật ngắn gọn".to_string(),
+            saved_prompts: Vec::new(),
             hotkey_translate: "[".to_string(),
             hotkey_select: "]".to_string(),
             hotkey_instant: "\\".to_string(),
@@ -58,20 +70,31 @@ impl Default for Config {
             show_overlay: false,
             fixed_regions: Vec::new(),
             arrow_region: None,
-            instant_region: None, // Mặc định None
+            instant_region: None,
             selected_api: "groq".to_string(),
             speed: 1.0,
+            arrow_check_interval: 0.02,
+            auto_copy: false,
+            copy_instant_only: false,
         }
     }
 }
 
 impl Config {
     pub fn get_wuxia_prompt() -> String {
-        "Perform OCR to extract all text from this image, regardless of the source language. Then, translate the extracted text into Vietnamese. The translation must strictly use vocabulary and tone consistent with wuxia novels, make it as short as possible. Crucially, provide ONLY the translated text and nothing else. Do not include any introductory phrases, explanations, or conversational elements. Note: just output the translated text and make it as short as possible".to_string()
+        "Perform OCR to extract all text from this image. Translate it into Vietnamese using wuxia novel vocabulary and tone. Make it concise. Provide ONLY the translated text.".to_string()
+    }
+
+    // --- PROMPT ĐÃ ĐƯỢC TỐI ƯU THEO YÊU CẦU MỚI ---
+    pub fn get_wuxia_speaker_prompt() -> String {
+        "Perform OCR. Check if there is a character name at the start. \
+        If yes: Analyze context to choose a Vietnamese verb (nói, hỏi, đáp, quát, cười, thầm nghĩ...) without brackets. Format: 'Name Verb: Content'. \
+        If no name found: Just translate the text normally. \
+        Constraint: Do NOT use quotation marks anywhere. Use wuxia vocabulary. Output ONLY the Vietnamese text.".to_string()
     }
 
     pub fn get_normal_prompt() -> String {
-        "Perform OCR to extract all text visible in this image, regardless of the original language. Then, translate the extracted text directly into Vietnamese. Return only the Vietnamese translation, no introduction or notes.".to_string()
+        "Perform OCR to extract all text visible in this image. Translate the extracted text directly into Vietnamese. Return only the Vietnamese translation, no introduction or notes.".to_string()
     }
 }
 
@@ -98,6 +121,8 @@ impl Config {
                     if config.active_groq_index >= config.groq_api_keys.len() && !config.groq_api_keys.is_empty() {
                         config.active_groq_index = 0;
                     }
+                    if config.arrow_check_interval < 0.02 { config.arrow_check_interval = 0.02; }
+                    if config.arrow_check_interval > 0.2 { config.arrow_check_interval = 0.2; }
                     config
                 },
                 Err(_) => Self::default(),

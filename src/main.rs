@@ -1,4 +1,4 @@
-#![windows_subsystem = "windows"] // <--- Đã bỏ comment để ẩn cửa sổ đen
+#![windows_subsystem = "windows"] 
 
 mod config;
 mod capture;
@@ -15,7 +15,10 @@ use winapi::shared::windef::RECT;
 use winapi::um::winuser::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
 use image;
 use std::fs;
-use webbrowser; // Thư viện để mở link
+use webbrowser;
+use arboard::Clipboard;
+use std::sync::Arc;
+use std::time::Duration; // Thêm Duration
 
 const DEFAULT_ARROW: &[u8] = include_bytes!("arrow.png");
 const AREA_PLACEHOLDER: &[u8] = include_bytes!("area.png");
@@ -30,7 +33,7 @@ struct MainApp {
     config: config::Config,
     gemini_api_key: String,
     current_prompt: String,
-    custom_prompt: String,
+    editing_prompt_index: Option<usize>,
     hotkey_translate: String,
     hotkey_select: String,
     hotkey_instant: String,
@@ -40,16 +43,18 @@ struct MainApp {
     listener_spawned: bool,
     show_popup: bool,
     popup_text: String,
-    in_custom_mode: bool,
     use_tts: bool,
     show_image_window: bool,
     show_arrow_window: bool,
     image_texture: Option<egui::TextureHandle>,
     arrow_texture: Option<egui::TextureHandle>,
     wwm_success_timer: Option<std::time::Instant>,
+    wwm_name_success_timer: Option<std::time::Instant>,
     arrow_wwm_success_timer: Option<std::time::Instant>,
     auto_translate_active: bool,
     show_password: bool,
+    // Thêm biến này để đồng bộ file config định kỳ
+    last_config_sync: std::time::Instant,
 }
 
 impl Default for MainApp {
@@ -63,7 +68,7 @@ impl Default for MainApp {
             config: config.clone(),
             gemini_api_key: config.gemini_api_key,
             current_prompt: config.current_prompt,
-            custom_prompt: config.custom_prompt,
+            editing_prompt_index: None,
             hotkey_translate: config.hotkey_translate,
             hotkey_select: config.hotkey_select,
             hotkey_instant: config.hotkey_instant,
@@ -73,16 +78,17 @@ impl Default for MainApp {
             listener_spawned: false,
             show_popup: false,
             popup_text: String::new(),
-            in_custom_mode: false,
             use_tts: config.use_tts,
             show_image_window: false,
             show_arrow_window: false,
             image_texture: None,
             arrow_texture: None,
             wwm_success_timer: None,
+            wwm_name_success_timer: None,
             arrow_wwm_success_timer: None,
             auto_translate_active: false,
             show_password: false,
+            last_config_sync: std::time::Instant::now(),
         }
     }
 }
@@ -104,26 +110,27 @@ impl MainApp {
         ctx.set_style(style);
     }
 
-    async fn perform_translation_logic(
-        config: config::Config,
-        tx: Sender<(String, bool, f32, bool)>
-    ) {
-        let regions = config.fixed_regions.clone();
-        Self::translate_regions(config, regions, tx).await;
+    // --- HÀM ĐỒNG BỘ CONFIG ---
+    // Hàm này giúp UI biết được nếu file config bị thay đổi bởi Overlay (chọn vùng mới)
+    fn sync_config_from_file(&mut self) {
+        let new_config = config::Config::load();
+        // Chỉ cập nhật các vùng chọn, giữ nguyên các setting khác trên UI
+        self.config.fixed_regions = new_config.fixed_regions;
+        self.config.arrow_region = new_config.arrow_region;
+        self.config.instant_region = new_config.instant_region;
     }
 
-    async fn perform_instant_translation(
-        config: config::Config,
-        tx: Sender<(String, bool, f32, bool)>,
-        region: config::Region
-    ) {
-        Self::translate_regions(config, vec![region], tx).await;
+    fn copy_to_clipboard(text: &str) {
+        if let Ok(mut clipboard) = Clipboard::new() {
+            let _ = clipboard.set_text(text);
+        }
     }
 
     async fn translate_regions(
         mut config: config::Config,
         regions: Vec<config::Region>,
-        tx: Sender<(String, bool, f32, bool)>
+        tx: Sender<(String, bool, f32, bool)>,
+        should_copy: bool,
     ) {
         let prompt = config.current_prompt.clone();
         let mut final_text = String::new();
@@ -158,7 +165,6 @@ impl MainApp {
                         },
                         Err(translation::TranslationError::RateLimitExceeded) => {
                             if config.selected_api == "groq" && config.groq_api_keys.len() > 1 {
-                                println!("Key {} hết hạn mức. Đang đổi key...", config.active_groq_index);
                                 config.active_groq_index = (config.active_groq_index + 1) % config.groq_api_keys.len();
                                 attempts += 1;
                                 continue;
@@ -169,7 +175,6 @@ impl MainApp {
                         },
                         Err(translation::TranslationError::Other(e)) => {
                             let error_msg = format!("Lỗi: {} ", e);
-                            println!("{}", error_msg);
                             final_text.push_str(&error_msg);
                             break; 
                         }
@@ -180,13 +185,18 @@ impl MainApp {
             }
         }
 
-        if !final_text.trim().is_empty() {
-            let _ = tx.send((final_text.clone(), config.split_tts, config.speed, config.use_tts));
+        let cleaned_text = final_text.trim().to_string();
+        if !cleaned_text.is_empty() {
+            if should_copy {
+                Self::copy_to_clipboard(&cleaned_text);
+            }
+
+            let _ = tx.send((cleaned_text.clone(), config.split_tts, config.speed, config.use_tts));
             if config.show_overlay {
                 if let Some(region) = regions.first() {
                     let rect = RECT { left: region.x, top: region.y, right: region.x + region.width as i32, bottom: region.y + region.height as i32 };
-                    let duration_ms = (final_text.chars().count() as f32 / 10.0 * 1000.0) as u32;
-                    std::thread::spawn(move || { show_result_window(rect, final_text.clone(), duration_ms); });
+                    let duration_ms = (cleaned_text.chars().count() as f32 / 10.0 * 1000.0) as u32;
+                    std::thread::spawn(move || { show_result_window(rect, cleaned_text, duration_ms); });
                 }
             }
         }
@@ -220,44 +230,43 @@ impl MainApp {
         // Thread Auto Translate
         std::thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().unwrap();
-            
             let load_arrow = || -> Vec<u8> {
                 let custom_path = config::Config::get_custom_arrow_path();
                 if custom_path.exists() { if let Ok(b) = fs::read(custom_path) { return b; } }
                 DEFAULT_ARROW.to_vec()
             };
-
             let arrow_bytes = load_arrow();
             let mut last_found_state = false;
             let mut miss_counter = 0;
-            const MISS_TOLERANCE: i32 = 5;
 
             loop {
+                let config = config::Config::load();
+                let check_interval = config.arrow_check_interval;
                 let enabled = AUTO_TRANSLATE_ENABLED.load(Ordering::Relaxed);
+                
                 if !enabled || arrow_bytes.is_empty() {
                     std::thread::sleep(std::time::Duration::from_millis(500));
                     continue;
                 }
 
-                let config = config::Config::load();
                 if let Some(arrow_region) = &config.arrow_region {
                     let found = capture::is_template_present(arrow_region, &arrow_bytes);
                     if found {
                         miss_counter = 0; 
                         if !last_found_state {
                             let tx_inner = tx_auto.clone();
-                            let config_clone = config.clone();
-                            rt.block_on(async { Self::perform_translation_logic(config_clone, tx_inner).await; });
+                            let should_copy = config.auto_copy && !config.copy_instant_only;
+                            rt.block_on(async { Self::translate_regions(config.clone(), config.fixed_regions.clone(), tx_inner, should_copy).await; });
                             last_found_state = true;
                         }
                     } else {
                         if last_found_state {
                             miss_counter += 1;
-                            if miss_counter > MISS_TOLERANCE { last_found_state = false; miss_counter = 0; }
+                            if miss_counter > 5 { last_found_state = false; miss_counter = 0; }
                         }
                     }
                 }
-                std::thread::sleep(std::time::Duration::from_millis(100)); 
+                std::thread::sleep(std::time::Duration::from_secs_f32(check_interval)); 
             }
         });
 
@@ -267,15 +276,14 @@ impl MainApp {
                 if LISTENING_PAUSED.load(Ordering::Relaxed) { return; }
                 let config = config::Config::load();
                 if let EventType::KeyPress(_) = event.event_type {
-                    
                     if event.name.as_ref() == Some(&config.hotkey_translate) {
                         let tx = tx_clone.clone();
                         std::thread::spawn(move || {
                             let config = config::Config::load();
                             let rt = tokio::runtime::Runtime::new().unwrap();
-                            rt.block_on(async { Self::perform_translation_logic(config, tx).await; });
+                            let should_copy = config.auto_copy && !config.copy_instant_only;
+                            rt.block_on(async { Self::translate_regions(config.clone(), config.fixed_regions.clone(), tx, should_copy).await; });
                         });
-                    
                     } else if event.name.as_ref() == Some(&config.hotkey_select) {
                          if !OVERLAY_ACTIVE.load(Ordering::Relaxed) {
                             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
@@ -286,26 +294,22 @@ impl MainApp {
                                 std::thread::spawn(|| { overlay::show_selection_overlay(); OVERLAY_ACTIVE.store(false, Ordering::Relaxed); });
                             }
                         }
-                    
                     } else if event.name.as_ref() == Some(&config.hotkey_instant) {
                         if !OVERLAY_ACTIVE.load(Ordering::Relaxed) {
                            OVERLAY_ACTIVE.store(true, Ordering::Relaxed);
-                           let tx_for_thread = tx_clone.clone();
+                           let tx = tx_clone.clone();
                            overlay::set_selection_mode(2);
                            std::thread::spawn(move || {
                                overlay::show_selection_overlay();
                                OVERLAY_ACTIVE.store(false, Ordering::Relaxed);
-                               
                                let config = config::Config::load();
-                               if let Some(instant_region) = config.instant_region.clone() {
+                               if let Some(region) = config.instant_region.clone() {
                                    let rt = tokio::runtime::Runtime::new().unwrap();
-                                   rt.block_on(async { 
-                                       Self::perform_instant_translation(config, tx_for_thread, instant_region).await; 
-                                   });
+                                   let should_copy = config.auto_copy;
+                                   rt.block_on(async { Self::translate_regions(config, vec![region], tx, should_copy).await; });
                                }
                            });
                        }
-                    
                     } else if event.name.as_ref() == Some(&config.hotkey_auto) {
                         if !OVERLAY_ACTIVE.load(Ordering::Relaxed) {
                             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
@@ -335,6 +339,13 @@ impl eframe::App for MainApp {
 
         self.configure_style(ctx);
 
+        // === CƠ CHẾ ĐỒNG BỘ CONFIG MỚI ===
+        // Cứ 1 giây load lại regions từ file để đảm bảo đồng bộ giữa UI và các thread khác
+        if self.last_config_sync.elapsed() > Duration::from_secs(1) {
+            self.sync_config_from_file();
+            self.last_config_sync = std::time::Instant::now();
+        }
+
         if self.image_texture.is_none() { self.load_texture(ctx, AREA_PLACEHOLDER, false); }
         if self.arrow_texture.is_none() {
              let custom_path = config::Config::get_custom_arrow_path();
@@ -344,7 +355,6 @@ impl eframe::App for MainApp {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.vertical_centered(|ui| {
-                // === THAY ĐỔI 1: TIÊU ĐỀ VÀ NÚT CREDIT ===
                 ui.horizontal(|ui| {
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center).with_main_align(egui::Align::Center), |ui| {
                         ui.heading(egui::RichText::new("Instant Screen Narrator").strong().size(24.0));
@@ -358,7 +368,7 @@ impl eframe::App for MainApp {
             });
 
             egui::ScrollArea::vertical().show(ui, |ui| {
-                // KHỐI 1: API
+                // KHỐI API
                 egui::CollapsingHeader::new(egui::RichText::new("🌐 Cấu hình API").strong()).default_open(true).show(ui, |ui| {
                     egui::Grid::new("api_grid").num_columns(2).spacing([20.0, 15.0]).striped(true).show(ui, |ui| {
                         ui.label("Dịch vụ:");
@@ -429,144 +439,279 @@ impl eframe::App for MainApp {
                         ui.end_row();
                     });
                 });
-                
                 ui.add_space(5.0);
+
+                // KHỐI PROMPT
                 egui::CollapsingHeader::new(egui::RichText::new("📝 Cấu hình Dịch (Prompt)").strong()).default_open(true).show(ui, |ui| {
                     ui.add_enabled_ui(!self.started, |ui| {
-                        ui.horizontal(|ui| {
-                            if ui.button("🗡️ Kiếm hiệp").clicked() { self.current_prompt = config::Config::get_wuxia_prompt(); self.in_custom_mode = false; }
-                            if ui.button("🌍 Thông thường").clicked() { self.current_prompt = config::Config::get_normal_prompt(); self.in_custom_mode = false; }
-                            if ui.button("🔧 Custom").clicked() { self.current_prompt = self.custom_prompt.clone(); self.in_custom_mode = true; }
-                        });
-                    });
-                    ui.add_enabled(!self.started, egui::TextEdit::multiline(&mut self.current_prompt).desired_rows(4).desired_width(f32::INFINITY));
-                    if self.in_custom_mode {
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
-                            if ui.add_enabled(!self.started, egui::Button::new("💾 Lưu Custom Prompt")).clicked() {
-                                self.custom_prompt = self.current_prompt.clone();
-                                self.config.custom_prompt = self.custom_prompt.clone();
+                        ui.horizontal_wrapped(|ui| {
+                            if ui.button("🗡️ Kiếm hiệp").clicked() { 
+                                self.current_prompt = config::Config::get_wuxia_prompt(); 
+                                self.editing_prompt_index = None;
+                            }
+                            if ui.button("🌍 Thông thường").clicked() { 
+                                self.current_prompt = config::Config::get_normal_prompt(); 
+                                self.editing_prompt_index = None;
+                            }
+
+                            let mut to_select = None;
+                            for (i, _) in self.config.saved_prompts.iter().enumerate() {
+                                let btn_label = format!("Mẫu {}", i + 1);
+                                let is_selected = self.editing_prompt_index == Some(i);
+                                if ui.add(egui::Button::new(btn_label).selected(is_selected)).clicked() {
+                                    to_select = Some(i);
+                                }
+                            }
+                            
+                            if let Some(i) = to_select {
+                                self.editing_prompt_index = Some(i);
+                                self.current_prompt = self.config.saved_prompts[i].content.clone();
+                            }
+
+                            if ui.button("➕").clicked() {
+                                self.config.saved_prompts.push(config::CustomPrompt {
+                                    content: String::new(),
+                                });
+                                self.editing_prompt_index = Some(self.config.saved_prompts.len() - 1);
+                                self.current_prompt = String::new();
                                 self.config.save().unwrap();
                             }
                         });
+                    });
+                    ui.add_space(5.0);
+                    
+                    if let Some(idx) = self.editing_prompt_index {
+                        if idx < self.config.saved_prompts.len() {
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new(format!("Đang sửa: Mẫu {}", idx + 1)).italics());
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if ui.add_enabled(!self.started, egui::Button::new(egui::RichText::new("🗑").color(egui::Color32::RED))).clicked() {
+                                        self.config.saved_prompts.remove(idx);
+                                        self.editing_prompt_index = None;
+                                        self.current_prompt = config::Config::get_normal_prompt();
+                                        self.config.save().unwrap();
+                                    }
+                                });
+                            });
+                        }
+                    }
+
+                    if ui.add_enabled(!self.started, egui::TextEdit::multiline(&mut self.current_prompt).desired_rows(4).desired_width(f32::INFINITY)).changed() {
+                        if let Some(idx) = self.editing_prompt_index {
+                            if idx < self.config.saved_prompts.len() {
+                                self.config.saved_prompts[idx].content = self.current_prompt.clone();
+                                self.config.save().unwrap();
+                            }
+                        }
                     }
                 });
                 ui.add_space(5.0);
 
-                egui::CollapsingHeader::new(egui::RichText::new("⌨️ Phím tắt").strong()).default_open(true).show(ui, |ui| {
+                // KHỐI PHÍM TẮT CHUNG
+                egui::CollapsingHeader::new(egui::RichText::new("⌨️ Phím tắt chung").strong()).default_open(true).show(ui, |ui| {
                      egui::Grid::new("hotkey_grid").num_columns(2).spacing([20.0, 10.0]).striped(true).show(ui, |ui| {
                         ui.label("Dịch vùng đã chọn:"); ui.add_enabled(!self.started, egui::TextEdit::singleline(&mut self.hotkey_translate).desired_width(80.0)); ui.end_row();
                         ui.label("Chọn vùng dịch:"); ui.add_enabled(!self.started, egui::TextEdit::singleline(&mut self.hotkey_select).desired_width(80.0)); ui.end_row();
                         ui.label("Chụp & Dịch ngay:"); ui.add_enabled(!self.started, egui::TextEdit::singleline(&mut self.hotkey_instant).desired_width(80.0)); ui.end_row();
-                        ui.label("Chọn vùng Mũi tên:"); ui.add_enabled(!self.started, egui::TextEdit::singleline(&mut self.hotkey_auto).desired_width(80.0)); ui.end_row();
                     });
                 });
                 ui.add_space(5.0);
 
+                // KHỐI CÀI ĐẶT
                 egui::CollapsingHeader::new(egui::RichText::new("⚙️ Cài đặt hiển thị & Âm thanh").strong()).default_open(true).show(ui, |ui| {
                     egui::Grid::new("settings_grid").num_columns(2).spacing([20.0, 10.0]).show(ui, |ui| {
                         ui.label("Overlay:"); ui.add_enabled(!self.started, egui::Checkbox::new(&mut self.config.show_overlay, "Hiện văn bản trên màn hình")); ui.end_row();
                         ui.label("TTS (Đọc):");
                         ui.horizontal(|ui| {
                             ui.add_enabled(!self.started, egui::Checkbox::new(&mut self.use_tts, "Bật đọc giọng nói"));
-                            if self.use_tts { ui.add_enabled(!self.started, egui::Checkbox::new(&mut self.config.split_tts, "Split TTS (Chia nhỏ câu)")); }
+                            if self.use_tts { ui.add_enabled(false, egui::Checkbox::new(&mut self.config.split_tts, "Split TTS (Chia nhỏ câu)")); }
                         });
                         ui.end_row();
                         ui.label("Tốc độ đọc:"); ui.add_enabled(!self.started, egui::Slider::new(&mut self.config.speed, 0.5..=2.0).text("x")); ui.end_row();
+                        
+                        ui.label("Copy Text:");
+                        ui.vertical(|ui| {
+                            ui.add_enabled(!self.started, egui::Checkbox::new(&mut self.config.auto_copy, "Tự động Copy kết quả"));
+                            if self.config.auto_copy {
+                                ui.add_enabled(!self.started, egui::Checkbox::new(&mut self.config.copy_instant_only, "Chỉ áp dụng lên Dịch nhanh"));
+                            }
+                        });
+                        ui.end_row();
                     });
                 });
                 ui.add_space(20.0);
 
+                // === KHỐI RIÊNG: DỊCH WHERE WINDS MEET ===
                 ui.vertical_centered(|ui| {
-                    ui.horizontal(|ui| {
-                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center).with_main_align(egui::Align::Center), |ui| {
-                            let mut wwm_text = "🎯 Tự động chọn vùng dịch WWM";
-                            if let Some(time) = self.wwm_success_timer {
-                                if time.elapsed().as_secs_f32() < 1.0 { wwm_text = "✅ Đã chọn"; ctx.request_repaint(); } 
-                                else { self.wwm_success_timer = None; }
-                            }
-                            if ui.add_enabled(self.started, egui::Button::new(wwm_text)).clicked() {
-                                let screen_w = unsafe { GetSystemMetrics(SM_CXSCREEN) } as f32;
-                                let screen_h = unsafe { GetSystemMetrics(SM_CYSCREEN) } as f32;
-                                let r_x = 308.0 / 1920.0; let r_y = 919.0 / 1080.0;
-                                let r_w = 1313.0 / 1920.0; let r_h = 135.0 / 1080.0;
-                                let region = config::Region { x: (screen_w * r_x) as i32, y: (screen_h * r_y) as i32, width: (screen_w * r_w) as u32, height: (screen_h * r_h) as u32 };
-                                self.config.fixed_regions.clear(); self.config.fixed_regions.push(region.clone());
-                                self.config.save().unwrap();
-                                self.wwm_success_timer = Some(std::time::Instant::now());
-                                let rect = RECT{left: region.x, top: region.y, right: region.x + region.width as i32, bottom: region.y + region.height as i32};
-                                overlay::show_highlight(rect);
-                            }
-                            ui.label(egui::RichText::new("(Dành cho màn 16:9)").italics().color(egui::Color32::GRAY));
-                            if ui.button("🖼️ Ảnh").clicked() { self.show_image_window = true; }
+                    egui::CollapsingHeader::new(egui::RichText::new("🎮 Dịch Where Winds Meet").strong()).default_open(true).show(ui, |ui| {
+                        ui.add_space(5.0);
+                        
+                        ui.horizontal(|ui| {
+                            ui.label("Phím tắt chọn vùng Mũi tên:");
+                            ui.add_enabled(!self.started, egui::TextEdit::singleline(&mut self.hotkey_auto).desired_width(50.0));
                         });
-                    });
-                    ui.add_space(5.0);
+                        ui.add_space(5.0);
 
-                    ui.horizontal(|ui| {
-                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center).with_main_align(egui::Align::Center), |ui| {
-                            let mut arrow_text = "🏹 Tự động chọn vùng Mũi tên WWM";
-                            if let Some(time) = self.arrow_wwm_success_timer {
-                                if time.elapsed().as_secs_f32() < 1.0 { arrow_text = "✅ Đã chọn"; ctx.request_repaint(); }
-                                else { self.arrow_wwm_success_timer = None; }
-                            }
-                            if ui.add_enabled(self.started, egui::Button::new(arrow_text)).clicked() {
-                                let screen_w = unsafe { GetSystemMetrics(SM_CXSCREEN) } as f32;
-                                let screen_h = unsafe { GetSystemMetrics(SM_CYSCREEN) } as f32;
-                                let r_x = 930.0 / 1920.0; let r_y = 1042.0 / 1080.0;
-                                let r_w = 49.0 / 1920.0; let r_h = 36.0 / 1080.0;
-                                let region = config::Region { x: (screen_w * r_x) as i32, y: (screen_h * r_y) as i32, width: (screen_w * r_w) as u32, height: (screen_h * r_h) as u32 };
-                                self.config.arrow_region = Some(region.clone());
-                                self.config.save().unwrap();
-                                self.arrow_wwm_success_timer = Some(std::time::Instant::now());
-                                let rect = RECT{left: region.x, top: region.y, right: region.x + region.width as i32, bottom: region.y + region.height as i32};
-                                overlay::show_highlight(rect);
-                            }
-                            ui.label(egui::RichText::new("(Dành cho màn 16:9)").italics().color(egui::Color32::GRAY));
-                            if ui.button("🖼️ Ảnh").clicked() { self.show_arrow_window = true; }
+                        // Nút chọn vùng WWM Thường (Reset Prompt)
+                        ui.horizontal(|ui| {
+                            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center).with_main_align(egui::Align::Center), |ui| {
+                                let mut wwm_text = "🎯 Tự động chọn vùng dịch WWM";
+                                if let Some(time) = self.wwm_success_timer {
+                                    if time.elapsed().as_secs_f32() < 1.0 { wwm_text = "✅ Đã chọn"; ctx.request_repaint(); } 
+                                    else { self.wwm_success_timer = None; }
+                                }
+                                if ui.add_enabled(self.started, egui::Button::new(wwm_text)).clicked() {
+                                    let screen_w = unsafe { GetSystemMetrics(SM_CXSCREEN) } as f32;
+                                    let screen_h = unsafe { GetSystemMetrics(SM_CYSCREEN) } as f32;
+                                    // Nới rộng 5px mỗi chiều
+                                    let r_x = 308.0 / 1920.0; let r_y = 919.0 / 1080.0;
+                                    let r_w = 1313.0 / 1920.0; let r_h = 135.0 / 1080.0;
+                                    
+                                    let region = config::Region {
+                                        x: (screen_w * r_x) as i32 - 5, 
+                                        y: (screen_h * r_y) as i32 - 5,
+                                        width: (screen_w * r_w) as u32 + 10, 
+                                        height: (screen_h * r_h) as u32 + 10
+                                    };
+                                    
+                                    self.config.fixed_regions.clear(); 
+                                    self.config.fixed_regions.push(region.clone());
+                                    
+                                    // Reset Prompt về Kiếm hiệp thuần túy
+                                    self.current_prompt = config::Config::get_wuxia_prompt();
+                                    self.config.current_prompt = self.current_prompt.clone();
+                                    self.editing_prompt_index = None;
+
+                                    self.config.save().unwrap();
+                                    // Quan trọng: Cập nhật lại trạng thái sau khi lưu
+                                    self.sync_config_from_file();
+                                    
+                                    self.wwm_success_timer = Some(std::time::Instant::now());
+                                    overlay::show_highlight(RECT{left: region.x, top: region.y, right: region.x + region.width as i32, bottom: region.y + region.height as i32});
+                                }
+                                ui.label(egui::RichText::new("(16:9)").italics().color(egui::Color32::GRAY));
+                                // Đã xóa nút ảnh ở đây theo yêu cầu
+                            });
                         });
-                    });
 
-                    ui.add_space(10.0);
+                        // Nút chọn vùng WWM Có Tên (Apply Prompt Mới)
+                        ui.horizontal(|ui| {
+                            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center).with_main_align(egui::Align::Center), |ui| {
+                                let mut wwm_name_text = "🎯 Tự chọn vùng dịch WWM (có tên người thoại)";
+                                if let Some(time) = self.wwm_name_success_timer {
+                                    if time.elapsed().as_secs_f32() < 1.0 { wwm_name_text = "✅ Đã chọn"; ctx.request_repaint(); } 
+                                    else { self.wwm_name_success_timer = None; }
+                                }
+                                if ui.add_enabled(self.started, egui::Button::new(wwm_name_text)).clicked() {
+                                    let screen_w = unsafe { GetSystemMetrics(SM_CXSCREEN) } as f32;
+                                    let screen_h = unsafe { GetSystemMetrics(SM_CYSCREEN) } as f32;
+                                    // Nới rộng 5px mỗi chiều
+                                    let r_x = 310.0 / 1920.0; let r_y = 868.0 / 1080.0;
+                                    let r_w = 1312.0 / 1920.0; let r_h = 187.0 / 1080.0;
+                                    
+                                    let region = config::Region {
+                                        x: (screen_w * r_x) as i32 - 5,
+                                        y: (screen_h * r_y) as i32 - 5,
+                                        width: (screen_w * r_w) as u32 + 10,
+                                        height: (screen_h * r_h) as u32 + 10
+                                    };
+                                    
+                                    self.config.fixed_regions.clear(); 
+                                    self.config.fixed_regions.push(region.clone());
+                                    
+                                    // Set Prompt "Kiếm hiệp + Tên"
+                                    self.current_prompt = config::Config::get_wuxia_speaker_prompt();
+                                    self.config.current_prompt = self.current_prompt.clone();
+                                    self.editing_prompt_index = None;
 
-                    ui.horizontal(|ui| {
-                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center).with_main_align(egui::Align::Center), |ui| {
-                            if self.started {
-                                if ui.toggle_value(&mut self.auto_translate_active, "🔄 Tự động dịch").changed() {
-                                    AUTO_TRANSLATE_ENABLED.store(self.auto_translate_active, Ordering::Relaxed);
+                                    self.config.save().unwrap();
+                                    // Quan trọng: Cập nhật lại trạng thái sau khi lưu
+                                    self.sync_config_from_file();
+
+                                    self.wwm_name_success_timer = Some(std::time::Instant::now());
+                                    overlay::show_highlight(RECT{left: region.x, top: region.y, right: region.x + region.width as i32, bottom: region.y + region.height as i32});
                                 }
-                                if self.auto_translate_active {
-                                    ui.label(egui::RichText::new("Đang chạy...").color(egui::Color32::GREEN));
+                                ui.label(egui::RichText::new("(16:9)").italics().color(egui::Color32::GRAY));
+                            });
+                        });
+
+                        ui.horizontal(|ui| {
+                            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center).with_main_align(egui::Align::Center), |ui| {
+                                let mut arrow_text = "🏹 Tự động chọn vùng Mũi tên WWM";
+                                if let Some(time) = self.arrow_wwm_success_timer {
+                                    if time.elapsed().as_secs_f32() < 1.0 { arrow_text = "✅ Đã chọn"; ctx.request_repaint(); }
+                                    else { self.arrow_wwm_success_timer = None; }
                                 }
-                                
-                                ui.separator();
-                                
-                                if ui.button("📂 Đổi ảnh mũi tên").clicked() {
-                                    if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png"]).pick_file() {
-                                        if let Ok(bytes) = fs::read(&path) {
-                                            let dest = config::Config::get_custom_arrow_path();
-                                            if let Ok(_) = fs::write(&dest, &bytes) {
-                                                self.load_texture(ctx, &bytes, true);
+                                if ui.add_enabled(self.started, egui::Button::new(arrow_text)).clicked() {
+                                    let screen_w = unsafe { GetSystemMetrics(SM_CXSCREEN) } as f32;
+                                    let screen_h = unsafe { GetSystemMetrics(SM_CYSCREEN) } as f32;
+                                    let r_x = 930.0 / 1920.0; let r_y = 1042.0 / 1080.0;
+                                    let r_w = 49.0 / 1920.0; let r_h = 36.0 / 1080.0;
+                                    let region = config::Region { x: (screen_w * r_x) as i32, y: (screen_h * r_y) as i32, width: (screen_w * r_w) as u32, height: (screen_h * r_h) as u32 };
+                                    self.config.arrow_region = Some(region.clone());
+                                    self.config.save().unwrap();
+                                    self.sync_config_from_file(); // Sync ngay
+                                    self.arrow_wwm_success_timer = Some(std::time::Instant::now());
+                                    overlay::show_highlight(RECT{left: region.x, top: region.y, right: region.x + region.width as i32, bottom: region.y + region.height as i32});
+                                }
+                                ui.label(egui::RichText::new("(16:9)").italics().color(egui::Color32::GRAY));
+                                if ui.button("🖼️").clicked() { self.show_arrow_window = true; }
+                            });
+                        });
+                        
+                        if self.started {
+                            ui.add_space(5.0);
+                            ui.label(egui::RichText::new("⚡ Tốc độ nhận diện mũi tên").strong());
+                            ui.add(egui::Slider::new(&mut self.config.arrow_check_interval, 0.02..=0.2).text("s"));
+                            if (self.config.arrow_check_interval - 0.02).abs() < 0.001 {
+                                ui.colored_label(egui::Color32::GREEN, "(Nên để mặc định: 0.02)");
+                            } else {
+                                ui.label(format!("(Quét mỗi {:.2} giây)", self.config.arrow_check_interval));
+                            }
+                            ui.add_space(5.0);
+
+                            ui.horizontal(|ui| {
+                                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center).with_main_align(egui::Align::Center), |ui| {
+                                    let btn_text = if self.auto_translate_active { "🔄 ĐANG BẬT TỰ ĐỘNG DỊCH" } else { "🔄 Bật Tự Động Dịch" };
+                                    let btn_color = if self.auto_translate_active { egui::Color32::DARK_GREEN } else { egui::Color32::from_rgb(60, 60, 60) };
+                                    
+                                    if ui.add(egui::Button::new(egui::RichText::new(btn_text).strong().color(egui::Color32::WHITE)).fill(btn_color).min_size(egui::vec2(200.0, 30.0))).clicked() {
+                                        self.auto_translate_active = !self.auto_translate_active;
+                                        AUTO_TRANSLATE_ENABLED.store(self.auto_translate_active, Ordering::Relaxed);
+                                    }
+                                });
+                            });
+                            
+                            ui.separator();
+                            
+                            ui.horizontal(|ui| {
+                                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center).with_main_align(egui::Align::Center), |ui| {
+                                    if ui.button("📂 Đổi ảnh mũi tên").clicked() {
+                                        if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png"]).pick_file() {
+                                            if let Ok(bytes) = fs::read(&path) {
+                                                let dest = config::Config::get_custom_arrow_path();
+                                                if let Ok(_) = fs::write(&dest, &bytes) {
+                                                    self.load_texture(ctx, &bytes, true);
+                                                }
                                             }
                                         }
                                     }
-                                }
-                                let custom_path = config::Config::get_custom_arrow_path();
-                                if custom_path.exists() {
-                                    if ui.button("❌ Reset Mặc định").clicked() {
-                                        let _ = fs::remove_file(custom_path);
-                                        self.load_texture(ctx, DEFAULT_ARROW, true);
+                                    let custom_path = config::Config::get_custom_arrow_path();
+                                    if custom_path.exists() {
+                                        if ui.button("❌ Reset Mặc định").clicked() {
+                                            let _ = fs::remove_file(custom_path);
+                                            self.load_texture(ctx, DEFAULT_ARROW, true);
+                                        }
                                     }
-                                }
-                            } else {
-                                ui.add_enabled(false, egui::Button::new("🔄 Tự động dịch"));
-                            }
-                        });
+                                });
+                            });
+                        } else {
+                            ui.add_space(5.0);
+                            ui.label(egui::RichText::new("⚠️ Hãy bấm 'BẮT ĐẦU' để dùng tính năng này").color(egui::Color32::RED));
+                        }
+                        ui.add_space(5.0);
                     });
                     
-                    if self.started {
-                        ui.label(egui::RichText::new("Lưu ý: Nếu đổi ảnh, hãy Tắt/Bật lại Dịch Tự Động.").small().italics());
-                    }
-
                     ui.add_space(10.0);
 
                     if !self.started {
@@ -597,7 +742,6 @@ impl eframe::App for MainApp {
                         }
                     }
                     ui.add_space(10.0);
-                    // === THAY ĐỔI 2: ĐÃ XÓA DÒNG CẢNH BÁO ADMIN ===
                 });
             });
         });
@@ -665,7 +809,7 @@ fn main() -> Result<(), eframe::Error> {
             width: icon_width,
             height: icon_height,
         };
-        options.viewport.icon = Some(icon_data.into());
+        options.viewport.icon = Some(Arc::new(icon_data.into()));
     }
 
     eframe::run_native(
