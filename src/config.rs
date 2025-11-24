@@ -49,11 +49,17 @@ pub struct Config {
     pub auto_copy: bool,
     #[serde(default)]
     pub copy_instant_only: bool,
-    
-    // ĐÃ XÓA: minimize_to_tray
+
+    #[serde(default = "default_font_size")]
+    pub overlay_font_size: i32,
+
+    #[serde(default = "default_dark_mode")]
+    pub is_dark_mode: bool,
 }
 
 fn default_interval() -> f32 { 0.02 }
+fn default_font_size() -> i32 { 24 }
+fn default_dark_mode() -> bool { true }
 
 impl Default for Config {
     fn default() -> Self {
@@ -67,17 +73,22 @@ impl Default for Config {
             hotkey_select: "]".to_string(),
             hotkey_instant: "\\".to_string(),
             hotkey_auto: ";".to_string(),
-            split_tts: true,
+            
+            // --- CÁC THAY ĐỔI MẶC ĐỊNH ---
+            split_tts: true,      // Mặc định bật
             use_tts: true,
-            show_overlay: false,
+            show_overlay: true,   // Mặc định bật
+            speed: 1.45,          // Mặc định 1.45
+            
             fixed_regions: Vec::new(),
             arrow_region: None,
             instant_region: None,
             selected_api: "groq".to_string(),
-            speed: 1.0,
             arrow_check_interval: 0.02,
             auto_copy: false,
             copy_instant_only: false,
+            overlay_font_size: 24,
+            is_dark_mode: true,
         }
     }
 }
@@ -87,8 +98,12 @@ impl Config {
         "Perform OCR to extract all text from this image, regardless of the source language. Then, translate the extracted text into Vietnamese. The translation must strictly use vocabulary and tone consistent with wuxia novels, make it as short as possible. Crucially, provide ONLY the translated text and nothing else. Do not include any introductory phrases, explanations, or conversational elements. Note: just output the translated text and make it as short as possible".to_string()
     }
 
+    // --- PROMPT ĐÃ SỬA LOGIC CÓ TÊN/KHÔNG TÊN ---
     pub fn get_wuxia_speaker_prompt() -> String {
-        "Identify the character name at the beginning. Analyze the context/tone of the dialogue to choose a fitting Vietnamese verb (e.g., nói, hỏi, đáp, cười lạnh, quát...). Format the output strictly as: 'Name Verb: Vietnamese Translation'. Do NOT enclose the dialogue in quotation marks. Use wuxia novel vocabulary. Provide ONLY the translated result.".to_string()
+        "Perform OCR. Identify if there is a character name at the beginning. 
+        Case 1: If a Name exists, analyze context/tone to choose a fitting Vietnamese verb (e.g., nói, hỏi, đáp, cười lạnh, quát...). Format output as: 'Name Verb: Vietnamese Translation'.
+        Case 2: If NO Name exists, just output the 'Vietnamese Translation'.
+        Use wuxia novel vocabulary. Do NOT use quotation marks. Provide ONLY the result.".to_string()
     }
 
     pub fn get_normal_prompt() -> String {
@@ -121,6 +136,12 @@ impl Config {
                     }
                     if config.arrow_check_interval < 0.02 { config.arrow_check_interval = 0.02; }
                     if config.arrow_check_interval > 0.2 { config.arrow_check_interval = 0.2; }
+                    if config.overlay_font_size < 10 { config.overlay_font_size = 10; }
+                    if config.overlay_font_size > 72 { config.overlay_font_size = 72; }
+                    
+                    // Đảm bảo split_tts luôn bật nếu người dùng lỡ sửa file config thủ công
+                    config.split_tts = true; 
+                    
                     config
                 },
                 Err(_) => Self::default(),

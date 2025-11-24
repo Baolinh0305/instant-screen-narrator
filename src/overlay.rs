@@ -28,7 +28,7 @@ use winapi::um::libloaderapi::GetModuleHandleW;
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::collections::HashMap;
-use std::sync::{OnceLock, Once, atomic::{AtomicU8, AtomicBool, Ordering}};
+use std::sync::{OnceLock, Once, atomic::{AtomicU8, AtomicBool, AtomicI32, Ordering}};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config;
@@ -45,9 +45,14 @@ static HOVER_MAP: OnceLock<Mutex<HashMap<usize, bool>>> = OnceLock::new();
 
 static SELECTION_MODE: AtomicU8 = AtomicU8::new(0); 
 static DEBUG_ACTIVE: AtomicBool = AtomicBool::new(false);
+static CURRENT_FONT_SIZE: AtomicI32 = AtomicI32::new(24);
 
 pub fn set_selection_mode(mode: u8) {
     SELECTION_MODE.store(mode, Ordering::Relaxed);
+}
+
+pub fn set_font_size(size: i32) {
+    CURRENT_FONT_SIZE.store(size, Ordering::Relaxed);
 }
 
 pub fn is_debug_active() -> bool {
@@ -81,10 +86,7 @@ unsafe fn break_text_into_lines(hdc: winapi::shared::windef::HDC, text: &[u16], 
     lines
 }
 
-// ========================================================
-// DEBUG OVERLAY
-// ========================================================
-
+// ... (Giữ nguyên phần toggle_debug_overlay và debug_wnd_proc) ...
 pub fn toggle_debug_overlay() {
     let current = DEBUG_ACTIVE.load(Ordering::Relaxed);
     if current {
@@ -160,7 +162,6 @@ unsafe extern "system" fn debug_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, l
             let null_brush = winapi::um::wingdi::GetStockObject(winapi::um::wingdi::NULL_BRUSH as i32); 
             let old_brush = SelectObject(hdc, null_brush);
 
-            // 1. Vùng Dịch (ĐỎ)
             if !cfg.fixed_regions.is_empty() {
                 let red_pen = CreatePen(PS_SOLID.try_into().unwrap(), 2, 0x000000FF); 
                 let old_pen = SelectObject(hdc, red_pen as *mut winapi::ctypes::c_void);
@@ -177,7 +178,6 @@ unsafe extern "system" fn debug_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, l
                 SelectObject(hdc, old_pen); DeleteObject(red_pen as *mut winapi::ctypes::c_void);
             }
             
-            // 2. Vùng Mũi Tên (VÀNG)
             if let Some(arrow) = &cfg.arrow_region {
                 let yellow_pen = CreatePen(PS_SOLID.try_into().unwrap(), 2, 0x0000FFFF); 
                 let old_pen = SelectObject(hdc, yellow_pen as *mut winapi::ctypes::c_void);
@@ -192,7 +192,6 @@ unsafe extern "system" fn debug_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, l
                 SelectObject(hdc, old_pen); DeleteObject(yellow_pen as *mut winapi::ctypes::c_void);
             }
 
-            // 3. Vùng Dịch Nhanh (XANH)
             if let Some(instant) = &cfg.instant_region {
                 let blue_pen = CreatePen(PS_SOLID.try_into().unwrap(), 2, 0x00FF0000);
                 let old_pen = SelectObject(hdc, blue_pen as *mut winapi::ctypes::c_void);
@@ -215,10 +214,7 @@ unsafe extern "system" fn debug_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, l
     }
 }
 
-// ========================================================
-// SELECTION OVERLAY
-// ========================================================
-
+// ... (Giữ nguyên phần selection_overlay) ...
 pub fn show_selection_overlay() {
     unsafe {
         IS_DRAGGING = false;
@@ -338,6 +334,7 @@ fn process_region(region: config::Region) {
     config.save().unwrap();
 }
 
+// --- ĐÃ SỬA: LOGIC VẼ HIGHLIGHT ---
 pub fn show_highlight(rect: RECT) {
     std::thread::spawn(move || {
         unsafe {
@@ -347,7 +344,8 @@ pub fn show_highlight(rect: RECT) {
             wc.lpfnWndProc = Some(highlight_wnd_proc);
             wc.hInstance = instance;
             wc.lpszClassName = class_name.as_ptr();
-            wc.hbrBackground = CreateSolidBrush(0x00000000); 
+            // Dùng brush màu xanh lá nhạt để tô nền (cho dễ nhìn)
+            wc.hbrBackground = CreateSolidBrush(0x0000FF00); 
             RegisterClassW(&wc);
 
             let hwnd = CreateWindowExW(
@@ -357,8 +355,11 @@ pub fn show_highlight(rect: RECT) {
                 std::ptr::null_mut(), std::ptr::null_mut(), instance, std::ptr::null_mut()
             );
 
-            SetLayeredWindowAttributes(hwnd, 0x00000000, 0, LWA_COLORKEY);
-            SetTimer(hwnd, 999, 500, None);
+            // LWA_ALPHA = 0x00000002. Đặt độ trong suốt là 100/255 (~40% opacity)
+            SetLayeredWindowAttributes(hwnd, 0, 100, 0x00000002);
+            
+            // Tăng thời gian hiển thị lên 3000ms (3 giây)
+            SetTimer(hwnd, 999, 3000, None);
 
             let mut msg: MSG = std::mem::zeroed();
             while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) != 0 {
@@ -377,16 +378,23 @@ unsafe extern "system" fn highlight_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARA
             let hdc = BeginPaint(hwnd, &mut ps);
             let mut r: RECT = std::mem::zeroed(); GetClientRect(hwnd, &mut r);
             
-            let bg_brush = CreateSolidBrush(0x00000000);
-            FillRect(hdc, &r, bg_brush);
-            DeleteObject(bg_brush as *mut winapi::ctypes::c_void);
+            // 1. Vẽ nền (đã có màu xanh lá từ hbrBackground + LWA_ALPHA)
+            // Nhưng để chắc chắn ta fill lại 1 màu cụ thể, ví dụ màu xanh lá mạ 0x0090EE90 (WinAPI GDI là 0x00GGBBRR)
+            // Xanh lá chuẩn: 0x0000FF00.
+            let fill_brush = CreateSolidBrush(0x0000FF00);
+            FillRect(hdc, &r, fill_brush);
+            DeleteObject(fill_brush as *mut winapi::ctypes::c_void);
 
-            let brush = CreateSolidBrush(0x0000FF00); 
-            FrameRect(hdc, &r, brush);
+            // 2. Vẽ khung viền đậm
+            let border_brush = CreateSolidBrush(0x000000FF); // Màu đỏ 
+            FrameRect(hdc, &r, border_brush);
+            // Vẽ viền dày 3px
             let mut r2 = r; r2.left += 1; r2.top += 1; r2.right -= 1; r2.bottom -= 1;
-            FrameRect(hdc, &r2, brush);
+            FrameRect(hdc, &r2, border_brush);
+            let mut r3 = r2; r3.left += 1; r3.top += 1; r3.right -= 1; r3.bottom -= 1;
+            FrameRect(hdc, &r3, border_brush);
 
-            DeleteObject(brush as *mut winapi::ctypes::c_void);
+            DeleteObject(border_brush as *mut winapi::ctypes::c_void);
             EndPaint(hwnd, &mut ps); 0
         }
         WM_TIMER => { if wparam == 999 { KillTimer(hwnd, 999); PostMessageW(hwnd, WM_CLOSE, 0, 0); } 0 }
@@ -395,12 +403,18 @@ unsafe extern "system" fn highlight_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARA
     }
 }
 
+// ... (Giữ nguyên show_result_window và result_wnd_proc) ...
 static REGISTER_RESULT_CLASS: Once = Once::new();
 pub fn show_result_window(target_rect: RECT, text: String, duration_ms: u32) {
     unsafe {
         let instance = GetModuleHandleW(std::ptr::null()); let class_name = to_wide("TranslationResult");
         REGISTER_RESULT_CLASS.call_once(|| { let mut wc: WNDCLASSW = std::mem::zeroed(); wc.lpfnWndProc = Some(result_wnd_proc); wc.hInstance = instance; wc.lpszClassName = class_name.as_ptr(); wc.hbrBackground = CreateSolidBrush(0x00FF00FF); wc.style = winapi::um::winuser::CS_HREDRAW | winapi::um::winuser::CS_VREDRAW; RegisterClassW(&wc); });
-        let region_width = (target_rect.right - target_rect.left).abs(); let hdc_screen = GetDC(std::ptr::null_mut()); let hfont = CreateFontW(20, 0, 0, 0, 400, 0, 0, 0, 0, 0, 0, 2, 0, to_wide("Roboto").as_ptr()); SelectObject(hdc_screen, hfont as *mut winapi::ctypes::c_void);
+        let region_width = (target_rect.right - target_rect.left).abs(); let hdc_screen = GetDC(std::ptr::null_mut()); 
+        
+        let font_size = CURRENT_FONT_SIZE.load(Ordering::Relaxed);
+        let hfont = CreateFontW(font_size, 0, 0, 0, 400, 0, 0, 0, 0, 0, 0, 2, 0, to_wide("Roboto").as_ptr()); 
+        
+        SelectObject(hdc_screen, hfont as *mut winapi::ctypes::c_void);
         let padding = 10; let max_text_width = region_width - padding * 2; let mut text_rect = RECT { left: 0, top: 0, right: max_text_width, bottom: 0 }; let wide_text = to_wide(&text); DrawTextW(hdc_screen, wide_text.as_ptr(), -1, &mut text_rect, DT_CALCRECT | DT_WORDBREAK);
         let text_height = text_rect.bottom - text_rect.top; DeleteObject(hfont as *mut winapi::ctypes::c_void); ReleaseDC(std::ptr::null_mut(), hdc_screen);
         let height = text_height + padding * 2; let x = target_rect.left; let width = region_width as i32; let mut y = target_rect.top - height - 10; if y < 0 { y = target_rect.top + 10; }
@@ -426,7 +440,10 @@ unsafe extern "system" fn result_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, 
             else {
                 let hrgn = CreateRoundRectRgn(0, 0, rect.right, rect.bottom, 8, 8); let bg_br = CreateSolidBrush(0x00000000); FillRgn(mem_dc, hrgn, bg_br); DeleteObject(bg_br as *mut winapi::ctypes::c_void);
                 { let map_mutex = HOVER_MAP.get_or_init(|| Mutex::new(HashMap::new())); let map = map_mutex.lock().unwrap(); if *map.get(&(hwnd as usize)).unwrap_or(&false) { let g_br = CreateSolidBrush(0x0000FF00); FrameRgn(mem_dc, hrgn, g_br, 2, 2); DeleteObject(g_br as *mut winapi::ctypes::c_void); } }
-                SetBkMode(mem_dc, 1); SetTextColor(mem_dc, 0x00FFFFFF); let hfont = CreateFontW(20, 0, 0, 0, 400, 0, 0, 0, 0, 0, 0, 2, 0, to_wide("Roboto").as_ptr()); let old_font = SelectObject(mem_dc, hfont as *mut winapi::ctypes::c_void);
+                SetBkMode(mem_dc, 1); SetTextColor(mem_dc, 0x00FFFFFF); 
+                let font_size = CURRENT_FONT_SIZE.load(Ordering::Relaxed);
+                let hfont = CreateFontW(font_size, 0, 0, 0, 400, 0, 0, 0, 0, 0, 0, 2, 0, to_wide("Roboto").as_ptr()); 
+                let old_font = SelectObject(mem_dc, hfont as *mut winapi::ctypes::c_void);
                 let len = GetWindowTextLengthW(hwnd) + 1; let mut buf = vec![0u16; len as usize]; GetWindowTextW(hwnd, buf.as_mut_ptr(), len); let v_len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
                 let lines = break_text_into_lines(mem_dc, &buf[0..v_len], (rect.right - rect.left) - 20); let mut sz: SIZE = std::mem::zeroed(); GetTextExtentPoint32W(mem_dc, to_wide("A").as_ptr(), 1, &mut sz); let start_y = (rect.bottom - rect.top - (sz.cy * lines.len() as i32)) / 2;
                 for (i, line) in lines.iter().enumerate() { let y = start_y + (i as i32 * sz.cy); if i < lines.len() - 1 && line.spaces > 0 { SetTextJustification(mem_dc, ((rect.right - rect.left) - 20) - line.width, line.spaces as i32); TextOutW(mem_dc, 10, y, line.text.as_ptr(), line.text.len() as i32); SetTextJustification(mem_dc, 0, 0); } else { TextOutW(mem_dc, (rect.right - rect.left - line.width) / 2, y, line.text.as_ptr(), line.text.len() as i32); } }

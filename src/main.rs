@@ -1,4 +1,4 @@
-#![windows_subsystem = "windows"] 
+#![windows_subsystem = "windows"]
 
 mod config;
 mod capture;
@@ -9,22 +9,26 @@ mod key_utils;
 
 use crate::overlay::show_result_window;
 use eframe::egui;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicI32, Ordering}; 
-use std::sync::{mpsc::Sender, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::AtomicU64;
+use std::sync::{mpsc::{self, Receiver, Sender}, Mutex};
 use winapi::shared::windef::{RECT, HWND};
-use winapi::shared::minwindef::{UINT};
+use winapi::shared::minwindef::UINT;
 use winapi::um::winuser::*;
 use winapi::um::libloaderapi::GetModuleHandleW;
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
-use image;
+use image::{self, GenericImageView};
 use std::fs;
 use webbrowser;
 use arboard::Clipboard;
 use std::sync::Arc;
 use std::time::Duration;
 use std::sync::OnceLock;
-// ĐÃ XÓA import tray_icon
+
+// --- IMPORT TRAY ICON ---
+use tray_icon::{TrayIconBuilder, TrayIcon, TrayIconEvent, MouseButton};
+use tray_icon::menu::{Menu, MenuItem, MenuEvent};
 
 const DEFAULT_ARROW: &[u8] = include_bytes!("arrow.png");
 
@@ -32,26 +36,34 @@ static LAST_SELECT: AtomicU64 = AtomicU64::new(0);
 static OVERLAY_ACTIVE: AtomicBool = AtomicBool::new(false);
 static LISTENING_PAUSED: AtomicBool = AtomicBool::new(true);
 static AUTO_TRANSLATE_ENABLED: AtomicBool = AtomicBool::new(false);
-static GROQ_REMAINING: AtomicI32 = AtomicI32::new(-1); 
+static GROQ_REMAINING: AtomicI32 = AtomicI32::new(-1);
 static HOTKEYS_NEED_UPDATE: AtomicBool = AtomicBool::new(false);
 
 static IS_BINDING_MODE: AtomicBool = AtomicBool::new(false);
 static LAST_BOUND_KEY: OnceLock<Mutex<String>> = OnceLock::new();
 
-fn get_last_bound_key() -> String {
-    let mutex = LAST_BOUND_KEY.get_or_init(|| Mutex::new(String::new()));
-    let mut lock = mutex.lock().unwrap();
-    let val = lock.clone();
-    *lock = String::new(); 
-    val
+fn to_wide(s: &str) -> Vec<u16> {
+    OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
 }
 
-fn set_last_bound_key(s: String) {
-    let mutex = LAST_BOUND_KEY.get_or_init(|| Mutex::new(String::new()));
-    *mutex.lock().unwrap() = s;
-}
+fn force_show_window_at_position() {
+    unsafe {
+        let window_name = to_wide("Instant Screen Narrator");
+        let hwnd = FindWindowW(std::ptr::null(), window_name.as_ptr());
+        
+        if !hwnd.is_null() {
+            ShowWindow(hwnd, SW_RESTORE);
+            SetForegroundWindow(hwnd);
 
-fn to_wide(s: &str) -> Vec<u16> { OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect() }
+            let screen_height = GetSystemMetrics(SM_CYSCREEN);
+            let mut rect: RECT = std::mem::zeroed();
+            if GetWindowRect(hwnd, &mut rect) != 0 {
+                let current_width = rect.right - rect.left;
+                SetWindowPos(hwnd, std::ptr::null_mut(), 0, 0, current_width, screen_height, 0x0040); 
+            }
+        }
+    }
+}
 
 #[derive(Clone, Copy, PartialEq)]
 enum BindingTarget {
@@ -61,12 +73,16 @@ enum BindingTarget {
     Auto,
 }
 
+enum AppSignal {
+    Show,
+}
+
 struct MainApp {
     config: config::Config,
     gemini_api_key: String,
     current_prompt: String,
     editing_prompt_index: Option<usize>,
-    
+
     binding_target: Option<BindingTarget>,
 
     hotkey_translate: String,
@@ -80,30 +96,38 @@ struct MainApp {
     show_popup: bool,
     popup_text: String,
     use_tts: bool,
-    
+
     show_arrow_window: bool,
-    // Nút hỏi chấm giải thích
     show_arrow_help: bool,
     arrow_texture: Option<egui::TextureHandle>,
-    
+
     wwm_success_timer: Option<std::time::Instant>,
     wwm_name_success_timer: Option<std::time::Instant>,
     arrow_wwm_success_timer: Option<std::time::Instant>,
     auto_translate_active: bool,
     show_password: bool,
     last_config_sync: std::time::Instant,
-    
-    // ĐÃ XÓA _tray_icon
+
+    // --- NEW STATES ---
+    show_reset_confirm: bool, // Trạng thái hiện hộp thoại reset
+
+    _tray_icon: TrayIcon,
+    rx_signal: Receiver<AppSignal>,
 }
 
-impl Default for MainApp {
-    fn default() -> Self {
+impl MainApp {
+    fn new(cc: &eframe::CreationContext<'_>, tray_icon: TrayIcon, rx: Receiver<AppSignal>) -> Self {
         let mut config = config::Config::load();
         if config.groq_api_keys.is_empty() {
             config.groq_api_keys.push(String::new());
         }
 
-        // ĐÃ XÓA TẠO TRAY MENU
+        overlay::set_font_size(config.overlay_font_size);
+
+        std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_millis(500));
+            force_show_window_at_position();
+        });
 
         Self {
             config: config.clone(),
@@ -111,12 +135,12 @@ impl Default for MainApp {
             current_prompt: config.current_prompt,
             editing_prompt_index: None,
             binding_target: None,
-            
+
             hotkey_translate: config.hotkey_translate.clone(),
             hotkey_select: config.hotkey_select.clone(),
             hotkey_instant: config.hotkey_instant.clone(),
             hotkey_auto: config.hotkey_auto.clone(),
-            
+
             selected_api: config.selected_api,
             started: false,
             listener_spawned: false,
@@ -132,16 +156,26 @@ impl Default for MainApp {
             auto_translate_active: false,
             show_password: false,
             last_config_sync: std::time::Instant::now(),
+            
+            show_reset_confirm: false,
+
+            _tray_icon: tray_icon,
+            rx_signal: rx,
         }
     }
-}
 
-impl MainApp {
     fn configure_style(&self, ctx: &egui::Context) {
+        // Thiết lập theme dựa trên config
+        if self.config.is_dark_mode {
+            ctx.set_visuals(egui::Visuals::dark());
+        } else {
+            ctx.set_visuals(egui::Visuals::light());
+        }
+
         let mut style = (*ctx.style()).clone();
-        style.spacing.item_spacing = egui::vec2(6.0, 6.0); 
+        style.spacing.item_spacing = egui::vec2(6.0, 6.0);
         style.spacing.window_margin = egui::Margin::same(8.0);
-        
+
         style.visuals.widgets.noninteractive.rounding = egui::Rounding::same(4.0);
         style.visuals.widgets.inactive.rounding = egui::Rounding::same(4.0);
         style.visuals.widgets.hovered.rounding = egui::Rounding::same(4.0);
@@ -170,12 +204,12 @@ impl MainApp {
     fn check_key_binding(&mut self) {
         if let Some(target) = self.binding_target {
             unsafe {
-                for vk in 8..255 { 
+                for vk in 8..255 {
                     if (GetAsyncKeyState(vk) as u16 & 0x8000) != 0 {
                         if vk == VK_LBUTTON || vk == VK_RBUTTON || vk == VK_MBUTTON { continue; }
-                        
+
                         let key_name = crate::key_utils::get_name_from_vk(vk);
-                        
+
                         match target {
                             BindingTarget::Translate => { self.hotkey_translate = key_name.clone(); self.config.hotkey_translate = key_name; }
                             BindingTarget::Select => { self.hotkey_select = key_name.clone(); self.config.hotkey_select = key_name; }
@@ -184,7 +218,7 @@ impl MainApp {
                         }
                         self.config.save().unwrap();
                         HOTKEYS_NEED_UPDATE.store(true, Ordering::Relaxed);
-                        
+
                         self.binding_target = None;
                         IS_BINDING_MODE.store(false, Ordering::Relaxed);
                         std::thread::sleep(std::time::Duration::from_millis(200));
@@ -204,6 +238,8 @@ impl MainApp {
         let prompt = config.current_prompt.clone();
         let mut final_text = String::new();
         
+        overlay::set_font_size(config.overlay_font_size);
+
         for region in &regions {
             let image_bytes = capture::capture_image(region).unwrap_or_default();
             if !image_bytes.is_empty() {
@@ -285,7 +321,7 @@ impl MainApp {
 
     fn start_service(&mut self) {
         let (tx, rx) = std::sync::mpsc::channel::<(String, bool, f32, bool)>();
-        
+
         std::thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().unwrap();
             while let Ok((text, split_tts, speed, use_tts)) = rx.recv() {
@@ -296,7 +332,6 @@ impl MainApp {
         let tx_clone = tx.clone();
         let tx_auto = tx.clone();
 
-        // Thread Auto Translate
         std::thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().unwrap();
             let load_arrow = || -> Vec<u8> {
@@ -339,7 +374,6 @@ impl MainApp {
             }
         });
 
-        // --- WINDOWS HOTKEY LISTENER THREAD ---
         std::thread::spawn(move || {
             unsafe {
                 let instance = GetModuleHandleW(std::ptr::null());
@@ -427,8 +461,15 @@ impl MainApp {
 
 impl eframe::App for MainApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // ĐÃ XÓA HEARTBEAT (Nguyên nhân ngốn CPU)
-        // Không còn dòng: if !ctx.input... ctx.request_repaint_after...
+        while let Ok(signal) = self.rx_signal.try_recv() {
+            match signal {
+                AppSignal::Show => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                }
+            }
+        }
 
         let mut fonts = egui::FontDefinitions::default();
         fonts.font_data.insert("roboto".to_owned(), egui::FontData::from_static(include_bytes!("roboto.ttf")));
@@ -444,7 +485,7 @@ impl eframe::App for MainApp {
             ctx.request_repaint();
         }
 
-        if self.last_config_sync.elapsed() > Duration::from_secs(2) { // Sync 2s/lần
+        if self.last_config_sync.elapsed() > Duration::from_secs(1) {
             self.sync_config_from_file();
             self.last_config_sync = std::time::Instant::now();
         }
@@ -464,6 +505,20 @@ impl eframe::App for MainApp {
                         if ui.button(egui::RichText::new("👤 Tạo bởi: Baolinh0305").small()).clicked() {
                              let _ = webbrowser::open("https://github.com/Baolinh0305/instant-screen-narrator/releases");
                         }
+                        ui.add_space(10.0);
+                        
+                        // --- NÚT RESET & THEME ---
+                        ui.add_enabled_ui(!self.started, |ui| {
+                            if ui.button(egui::RichText::new("🔄 Reset").small().color(egui::Color32::RED)).clicked() {
+                                self.show_reset_confirm = true;
+                            }
+                            
+                            let theme_text = if self.config.is_dark_mode { "🌗 Theme: Tối" } else { "🌗 Theme: Sáng" };
+                            if ui.button(egui::RichText::new(theme_text).small()).clicked() {
+                                self.config.is_dark_mode = !self.config.is_dark_mode;
+                                self.config.save().unwrap();
+                            }
+                        });
                     });
                 });
                 ui.add_space(10.0);
@@ -484,7 +539,7 @@ impl eframe::App for MainApp {
                                         ui.selectable_value(&mut self.selected_api, "groq".to_string(), "Groq (Meta Llama)");
                                     });
                             });
-                            
+
                             if self.selected_api == "groq" {
                                 let remaining = GROQ_REMAINING.load(Ordering::Relaxed);
                                 if remaining >= 0 {
@@ -512,7 +567,7 @@ impl eframe::App for MainApp {
                                  let mut keys_to_remove = Vec::new();
                                  let show_pass = self.show_password;
                                  let started = self.started;
-                                 let keys_count = self.config.groq_api_keys.len(); 
+                                 let keys_count = self.config.groq_api_keys.len();
 
                                  for (i, key) in self.config.groq_api_keys.iter_mut().enumerate() {
                                      ui.horizontal(|ui| {
@@ -526,14 +581,14 @@ impl eframe::App for MainApp {
                                  for i in keys_to_remove.iter().rev() {
                                      self.config.groq_api_keys.remove(*i);
                                  }
-                                 
+
                                  if !self.started {
                                      if ui.button("➕ Thêm Key dự phòng").clicked() {
                                          self.config.groq_api_keys.push(String::new());
                                      }
                                  }
                              }
-                             
+
                              if ui.button(if self.show_password { "🙈 Ẩn Key" } else { "👁 Hiện Key" }).clicked() {
                                  self.show_password = !self.show_password;
                              }
@@ -642,18 +697,42 @@ impl eframe::App for MainApp {
                 });
                 ui.add_space(5.0);
 
-                // KHỐI CÀI ĐẶT
+// KHỐI CÀI ĐẶT
                 egui::CollapsingHeader::new(egui::RichText::new("⚙️ Cài đặt hiển thị & Âm thanh").strong()).default_open(true).show(ui, |ui| {
                     egui::Grid::new("settings_grid").num_columns(2).spacing([20.0, 10.0]).show(ui, |ui| {
-                        ui.label("Overlay:"); ui.add_enabled(!self.started, egui::Checkbox::new(&mut self.config.show_overlay, "Hiện văn bản trên màn hình")); ui.end_row();
-                        ui.label("TTS (Đọc):");
+                        
+                        // --- GROUP: OVERLAY & FONT SIZE ---
+                        ui.label("Overlay:");
                         ui.horizontal(|ui| {
-                            ui.add_enabled(!self.started, egui::Checkbox::new(&mut self.use_tts, "Bật đọc giọng nói"));
-                            if self.use_tts { ui.add_enabled(false, egui::Checkbox::new(&mut self.config.split_tts, "Split TTS (Chia nhỏ câu)")); }
+                            ui.add_enabled(!self.started, egui::Checkbox::new(&mut self.config.show_overlay, "Hiện văn bản"));
+                            ui.add_space(10.0);
+                            ui.label("Cỡ chữ:");
+                            // Chỉ enable slider khi show_overlay = true
+                            if ui.add_enabled(!self.started && self.config.show_overlay, egui::Slider::new(&mut self.config.overlay_font_size, 10..=72).text("px")).changed() {
+                                overlay::set_font_size(self.config.overlay_font_size);
+                                self.config.save().unwrap();
+                            }
                         });
                         ui.end_row();
-                        ui.label("Tốc độ đọc:"); ui.add_enabled(!self.started, egui::Slider::new(&mut self.config.speed, 0.5..=2.0).text("x")); ui.end_row();
+
+                        // --- GROUP: TTS & SPEED ---
+                        ui.label("TTS (Đọc):");
+                        ui.horizontal(|ui| {
+                            ui.add_enabled(!self.started, egui::Checkbox::new(&mut self.use_tts, "Bật đọc"));
+                            ui.add_space(10.0);
+                            ui.label("Tốc độ:");
+                            // Chỉ enable slider khi use_tts = true
+                            ui.add_enabled(!self.started && self.use_tts, egui::Slider::new(&mut self.config.speed, 0.5..=2.0).text("x"));
+                        });
+                        ui.end_row();
                         
+                        // --- OPTION: SPLIT TTS (ĐÃ KHÓA - LUÔN BẬT) ---
+                        ui.label(""); // Spacer cột 1
+                        // Disabled UI nhưng checkbox luôn là true
+                        self.config.split_tts = true; 
+                        ui.add_enabled(false, egui::Checkbox::new(&mut self.config.split_tts, "Split TTS (Luôn bật)"));
+                        ui.end_row();
+
                         ui.label("Copy Text:");
                         ui.vertical(|ui| {
                             ui.add_enabled(!self.started, egui::Checkbox::new(&mut self.config.auto_copy, "Tự động Copy kết quả"));
@@ -662,7 +741,6 @@ impl eframe::App for MainApp {
                             }
                         });
                         ui.end_row();
-                        // ĐÃ XÓA CHECKBOX TRAY
                     });
                 });
                 ui.add_space(20.0);
@@ -728,7 +806,7 @@ impl eframe::App for MainApp {
                                     self.editing_prompt_index = None;
 
                                     self.config.save().unwrap();
-                                    self.sync_config_from_file(); // SYNC NGAY
+                                    self.sync_config_from_file(); 
                                     
                                     self.wwm_success_timer = Some(std::time::Instant::now());
                                     overlay::show_highlight(RECT{left: region.x, top: region.y, right: region.x + region.width as i32, bottom: region.y + region.height as i32});
@@ -761,7 +839,7 @@ impl eframe::App for MainApp {
                                     self.editing_prompt_index = None;
 
                                     self.config.save().unwrap();
-                                    self.sync_config_from_file(); // SYNC NGAY
+                                    self.sync_config_from_file(); 
 
                                     self.wwm_name_success_timer = Some(std::time::Instant::now());
                                     overlay::show_highlight(RECT{left: region.x, top: region.y, right: region.x + region.width as i32, bottom: region.y + region.height as i32});
@@ -786,7 +864,7 @@ impl eframe::App for MainApp {
                                     let region = config::Region { x: (screen_w * r_x) as i32, y: (screen_h * r_y) as i32, width: (screen_w * r_w) as u32, height: (screen_h * r_h) as u32 };
                                     self.config.arrow_region = Some(region.clone());
                                     self.config.save().unwrap();
-                                    self.sync_config_from_file(); // SYNC NGAY
+                                    self.sync_config_from_file(); 
                                     self.arrow_wwm_success_timer = Some(std::time::Instant::now());
                                     overlay::show_highlight(RECT{left: region.x, top: region.y, right: region.x + region.width as i32, bottom: region.y + region.height as i32});
                                 }
@@ -822,7 +900,6 @@ impl eframe::App for MainApp {
                             
                             ui.horizontal(|ui| {
                                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center).with_main_align(egui::Align::Center), |ui| {
-                                    // Nút Bật/Tắt DEBUG
                                     if ui.button("🐞 Debug Overlay").clicked() {
                                         overlay::toggle_debug_overlay();
                                     }
@@ -875,14 +952,27 @@ impl eframe::App for MainApp {
                             if !self.listener_spawned { self.start_service(); self.listener_spawned = true; }
                         }
                     } else {
-                        let stop_btn = egui::Button::new(egui::RichText::new("⏹ Dừng").size(20.0).strong().color(egui::Color32::WHITE))
-                            .min_size(egui::vec2(250.0, 50.0)).fill(egui::Color32::from_rgb(200, 50, 50));
-                        if ui.add(stop_btn).clicked() { 
-                            self.started = false; 
-                            self.auto_translate_active = false;
-                            AUTO_TRANSLATE_ENABLED.store(false, Ordering::Relaxed);
-                            LISTENING_PAUSED.store(true, Ordering::Relaxed); 
-                        }
+                        // KHI ĐÃ START: Hiện nút Dừng và nút Ẩn Tray
+                        ui.horizontal(|ui| {
+                            // Nút Dừng
+                            let stop_btn = egui::Button::new(egui::RichText::new("⏹ Dừng").size(20.0).strong().color(egui::Color32::WHITE))
+                                .min_size(egui::vec2(150.0, 50.0)).fill(egui::Color32::from_rgb(200, 50, 50));
+                            if ui.add(stop_btn).clicked() { 
+                                self.started = false; 
+                                self.auto_translate_active = false;
+                                AUTO_TRANSLATE_ENABLED.store(false, Ordering::Relaxed);
+                                LISTENING_PAUSED.store(true, Ordering::Relaxed); 
+                            }
+
+                            ui.add_space(10.0);
+
+                            // Nút Ẩn vào Tray Icon
+                            let tray_btn = egui::Button::new(egui::RichText::new("🔽 Ẩn vào Tray").size(16.0).strong())
+                                .min_size(egui::vec2(120.0, 50.0));
+                            if ui.add(tray_btn).clicked() {
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                            }
+                        });
                     }
                     ui.add_space(10.0);
                 });
@@ -907,6 +997,76 @@ impl eframe::App for MainApp {
                 ui.vertical_centered(|ui| { if ui.button("Đã hiểu").clicked() { self.show_popup = false; } });
             });
             if !open { self.show_popup = false; }
+        }
+
+        // --- HỘP THOẠI XÁC NHẬN RESET ---
+        if self.show_reset_confirm {
+            let mut open = true;
+            egui::Window::new("⚠️ Xác nhận Reset")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .open(&mut open)
+                .show(ctx, |ui| {
+                    ui.label("Bạn có muốn giữ lại API Key không?");
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("✅ Có (Giữ Key)").clicked() {
+                            // Reset nhưng giữ key
+                            let saved_gemini = self.config.gemini_api_key.clone();
+                            let saved_groq = self.config.groq_api_keys.clone();
+                            
+                            self.config = config::Config::default();
+                            self.config.gemini_api_key = saved_gemini;
+                            self.config.groq_api_keys = saved_groq;
+                            
+                            // Sync UI
+                            self.gemini_api_key = self.config.gemini_api_key.clone();
+                            self.current_prompt = self.config.current_prompt.clone();
+                            self.editing_prompt_index = None;
+                            self.hotkey_translate = self.config.hotkey_translate.clone();
+                            self.hotkey_select = self.config.hotkey_select.clone();
+                            self.hotkey_instant = self.config.hotkey_instant.clone();
+                            self.hotkey_auto = self.config.hotkey_auto.clone();
+                            self.selected_api = self.config.selected_api.clone();
+                            self.use_tts = self.config.use_tts;
+                            
+                            overlay::set_font_size(self.config.overlay_font_size);
+                            HOTKEYS_NEED_UPDATE.store(true, Ordering::Relaxed);
+                            let _ = self.config.save();
+                            
+                            self.show_reset_confirm = false;
+                        }
+                        
+                        if ui.button("❌ Không (Xóa sạch)").clicked() {
+                            // Reset toàn bộ
+                            self.config = config::Config::default();
+                            
+                            // Sync UI
+                            self.gemini_api_key = String::new();
+                            self.config.groq_api_keys = vec![String::new()]; // Đảm bảo có 1 key rỗng
+                            self.current_prompt = self.config.current_prompt.clone();
+                            self.editing_prompt_index = None;
+                            self.hotkey_translate = self.config.hotkey_translate.clone();
+                            self.hotkey_select = self.config.hotkey_select.clone();
+                            self.hotkey_instant = self.config.hotkey_instant.clone();
+                            self.hotkey_auto = self.config.hotkey_auto.clone();
+                            self.selected_api = self.config.selected_api.clone();
+                            self.use_tts = self.config.use_tts;
+                            
+                            overlay::set_font_size(self.config.overlay_font_size);
+                            HOTKEYS_NEED_UPDATE.store(true, Ordering::Relaxed);
+                            let _ = self.config.save();
+                            
+                            self.show_reset_confirm = false;
+                        }
+                        
+                        if ui.button("🔙 Hủy").clicked() {
+                            self.show_reset_confirm = false;
+                        }
+                    });
+                });
+            if !open { self.show_reset_confirm = false; }
         }
 
         if self.show_arrow_window {
@@ -940,6 +1100,7 @@ fn main() -> Result<(), eframe::Error> {
     options.viewport.transparent = Some(false);
     options.viewport.inner_size = Some(egui::vec2(900.0, 950.0));
     options.viewport.taskbar = Some(true);
+    options.viewport.position = Some(egui::pos2(0.0, 0.0));
 
     let icon_bytes = include_bytes!("icon2.ico");
     if let Ok(icon_image) = image::load_from_memory(icon_bytes) {
@@ -954,9 +1115,60 @@ fn main() -> Result<(), eframe::Error> {
         options.viewport.icon = Some(Arc::new(icon_data.into()));
     }
 
+    let tray_menu = Menu::new();
+    let item_show = MenuItem::with_id("show", "Hiện ứng dụng / Cài đặt", true, None);
+    let item_quit = MenuItem::with_id("quit", "Thoát hoàn toàn", true, None);
+    let _ = tray_menu.append(&item_show);
+    let _ = tray_menu.append(&item_quit);
+
+    let (tx, rx) = mpsc::channel();
+
+    let tray_icon_obj = if let Ok(image) = image::load_from_memory(icon_bytes) {
+        let rgba = image.to_rgba8();
+        let (width, height) = image.dimensions();
+        if let Ok(icon) = tray_icon::Icon::from_rgba(rgba.into_raw(), width, height) {
+             TrayIconBuilder::new()
+            .with_menu(Box::new(tray_menu))
+            .with_tooltip("Instant Screen Narrator")
+            .with_icon(icon)
+            .build()
+            .ok()
+        } else { None }
+    } else { None };
+    
+    let tray_icon = tray_icon_obj.expect("Failed to create Tray Icon!");
+
     eframe::run_native(
         "Instant Screen Narrator",
         options,
-        Box::new(|_cc| Box::new(MainApp::default())),
+        Box::new(move |cc| {
+            let ctx_clone = cc.egui_ctx.clone();
+            let tx_clone = tx.clone();
+
+            std::thread::spawn(move || {
+                while let Ok(_) = TrayIconEvent::receiver().recv() {
+                    force_show_window_at_position();
+                    let _ = tx_clone.send(AppSignal::Show);
+                    ctx_clone.request_repaint();
+                }
+            });
+
+            let ctx_clone2 = cc.egui_ctx.clone();
+            let tx_clone2 = tx.clone();
+
+            std::thread::spawn(move || {
+                while let Ok(event) = MenuEvent::receiver().recv() {
+                    if event.id.as_ref() == "show" {
+                        force_show_window_at_position();
+                        let _ = tx_clone2.send(AppSignal::Show);
+                        ctx_clone2.request_repaint();
+                    } else if event.id.as_ref() == "quit" {
+                        std::process::exit(0);
+                    }
+                }
+            });
+
+            Box::new(MainApp::new(cc, tray_icon, rx))
+        }),
     )
 }
