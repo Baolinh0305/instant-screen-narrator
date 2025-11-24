@@ -3,7 +3,7 @@ use winapi::shared::minwindef::{WPARAM, LPARAM, LRESULT};
 use winapi::um::winuser::{
     GetSystemMetrics, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SM_CXVIRTUALSCREEN,
     SM_CYVIRTUALSCREEN, CreateWindowExW, RegisterClassW, WNDCLASSW, UnregisterClassW,
-    SetLayeredWindowAttributes, LWA_ALPHA, LWA_COLORKEY, LoadCursorW, IDC_HAND, IDC_ARROW, FillRect, // Thêm IDC_ARROW
+    SetLayeredWindowAttributes, LWA_ALPHA, LWA_COLORKEY, LoadCursorW, IDC_HAND, IDC_ARROW, FillRect,
     FrameRect, InvalidateRect, SetCapture, ReleaseCapture, GetCursorPos, PostMessageW,
     WM_CLOSE, WM_KEYDOWN, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_LBUTTONUP, WM_PAINT,
     WM_DESTROY, VK_ESCAPE, BeginPaint, EndPaint, PAINTSTRUCT, GetMessageW,
@@ -13,14 +13,14 @@ use winapi::um::winuser::{
     DT_WORDBREAK, SetTimer, KillTimer, WM_TIMER, GetDC, ReleaseDC, DT_CALCRECT,
     SetCursor, WM_SETCURSOR, TrackMouseEvent, TRACKMOUSEEVENT, TME_LEAVE, WM_MOUSELEAVE,
     GetWindowRect, ShowWindow, SW_SHOW, IsWindow,
-    WS_EX_NOACTIVATE, UpdateWindow
+    WS_EX_NOACTIVATE, UpdateWindow, WS_EX_TRANSPARENT
 };
 use winapi::um::wingdi::{
     CreateCompatibleDC, CreateCompatibleBitmap, SelectObject, DeleteObject, DeleteDC,
     BitBlt, SRCCOPY, CreateSolidBrush, SetTextColor, CreateFontW, SetBkMode,
     CreateRoundRectRgn, AddFontMemResourceEx, FrameRgn, FillRgn,
     GetTextExtentPoint32W, SetTextJustification, TextOutW,
-    MoveToEx, LineTo, CreatePen, PS_SOLID
+    MoveToEx, LineTo, CreatePen, PS_SOLID, TRANSPARENT
 };
 use winapi::um::winuser::MoveWindow;
 use std::sync::Mutex;
@@ -28,12 +28,11 @@ use winapi::um::libloaderapi::GetModuleHandleW;
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::collections::HashMap;
-use std::sync::{OnceLock, Once, atomic::{AtomicU8, Ordering}};
+use std::sync::{OnceLock, Once, atomic::{AtomicU8, AtomicBool, Ordering}};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config;
 
-// --- Struct & Globals ---
 #[derive(Clone, Copy)]
 struct Particle { x: f32, y: f32, vx: f32, vy: f32, size: i32, color: u32 }
 
@@ -45,12 +44,16 @@ static OVERLAY_LIST: Mutex<Vec<usize>> = Mutex::new(Vec::new());
 static HOVER_MAP: OnceLock<Mutex<HashMap<usize, bool>>> = OnceLock::new();
 
 static SELECTION_MODE: AtomicU8 = AtomicU8::new(0); 
+static DEBUG_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 pub fn set_selection_mode(mode: u8) {
     SELECTION_MODE.store(mode, Ordering::Relaxed);
 }
 
-// --- Helpers ---
+pub fn is_debug_active() -> bool {
+    DEBUG_ACTIVE.load(Ordering::Relaxed)
+}
+
 fn to_wide(s: &str) -> Vec<u16> { OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect() }
 fn simple_rng(seed: &mut u32) -> u32 { *seed = seed.wrapping_mul(1103515245).wrapping_add(12345); (*seed / 65536) % 32768 }
 fn get_random_f32(seed: &mut u32, min: f32, max: f32) -> f32 { let r = simple_rng(seed) as f32 / 32768.0; min + r * (max - min) }
@@ -76,6 +79,140 @@ unsafe fn break_text_into_lines(hdc: winapi::shared::windef::HDC, text: &[u16], 
     }
     if !current_line.is_empty() { let spaces = current_line.iter().filter(|&&c| c == 32).count() as i32; lines.push(TextLine { text: current_line, width: current_width, spaces }); }
     lines
+}
+
+// ========================================================
+// DEBUG OVERLAY
+// ========================================================
+
+pub fn toggle_debug_overlay() {
+    let current = DEBUG_ACTIVE.load(Ordering::Relaxed);
+    if current {
+        DEBUG_ACTIVE.store(false, Ordering::Relaxed);
+    } else {
+        DEBUG_ACTIVE.store(true, Ordering::Relaxed);
+        std::thread::spawn(|| {
+            unsafe {
+                let instance = GetModuleHandleW(std::ptr::null());
+                let class_name = to_wide("DebugOverlay");
+                let mut wc: WNDCLASSW = std::mem::zeroed();
+                wc.lpfnWndProc = Some(debug_wnd_proc);
+                wc.hInstance = instance;
+                wc.lpszClassName = class_name.as_ptr();
+                wc.hbrBackground = CreateSolidBrush(0x00000000); 
+                RegisterClassW(&wc);
+
+                let x = GetSystemMetrics(SM_XVIRTUALSCREEN);
+                let y = GetSystemMetrics(SM_YVIRTUALSCREEN);
+                let w = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+                let h = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+
+                let hwnd = CreateWindowExW(
+                    WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT,
+                    class_name.as_ptr(), to_wide("DebugRects").as_ptr(), WS_POPUP | WS_VISIBLE,
+                    x, y, w, h, std::ptr::null_mut(), std::ptr::null_mut(), instance, std::ptr::null_mut()
+                );
+
+                SetLayeredWindowAttributes(hwnd, 0x00000000, 0, LWA_COLORKEY);
+                SetTimer(hwnd, 1, 100, None);
+
+                let mut msg: MSG = std::mem::zeroed();
+                while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) != 0 {
+                    TranslateMessage(&msg); DispatchMessageW(&msg);
+                    if msg.message == WM_CLOSE { break; }
+                }
+                UnregisterClassW(class_name.as_ptr(), instance);
+            }
+        });
+    }
+}
+
+unsafe extern "system" fn debug_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    match msg {
+        WM_TIMER => {
+            if !DEBUG_ACTIVE.load(Ordering::Relaxed) {
+                KillTimer(hwnd, 1);
+                PostMessageW(hwnd, WM_CLOSE, 0, 0);
+            } else {
+                InvalidateRect(hwnd, std::ptr::null(), 0);
+            }
+            0
+        }
+        WM_PAINT => {
+            let mut ps: PAINTSTRUCT = std::mem::zeroed();
+            let hdc = BeginPaint(hwnd, &mut ps);
+            let mut r: RECT = std::mem::zeroed(); GetClientRect(hwnd, &mut r);
+            
+            let bg_brush = CreateSolidBrush(0x00000000);
+            FillRect(hdc, &r, bg_brush);
+            DeleteObject(bg_brush as *mut winapi::ctypes::c_void);
+
+            SetBkMode(hdc, TRANSPARENT as i32);
+            
+            let debug_txt = to_wide("DEBUG MODE: ON");
+            SetTextColor(hdc, 0x0000FF00); 
+            TextOutW(hdc, 10, 10, debug_txt.as_ptr(), debug_txt.len() as i32);
+
+            let cfg = config::Config::load();
+            let vx = GetSystemMetrics(SM_XVIRTUALSCREEN); 
+            let vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+
+            let null_brush = winapi::um::wingdi::GetStockObject(winapi::um::wingdi::NULL_BRUSH as i32); 
+            let old_brush = SelectObject(hdc, null_brush);
+
+            // 1. Vùng Dịch (ĐỎ)
+            if !cfg.fixed_regions.is_empty() {
+                let red_pen = CreatePen(PS_SOLID.try_into().unwrap(), 2, 0x000000FF); 
+                let old_pen = SelectObject(hdc, red_pen as *mut winapi::ctypes::c_void);
+                for region in &cfg.fixed_regions {
+                    let left = region.x - vx;
+                    let top = region.y - vy;
+                    let right = left + region.width as i32;
+                    let bottom = top + region.height as i32;
+                    winapi::um::wingdi::Rectangle(hdc, left, top, right, bottom);
+                    let txt = to_wide("Vùng Dịch");
+                    SetTextColor(hdc, 0x000000FF);
+                    TextOutW(hdc, left, top - 20, txt.as_ptr(), txt.len() as i32);
+                }
+                SelectObject(hdc, old_pen); DeleteObject(red_pen as *mut winapi::ctypes::c_void);
+            }
+            
+            // 2. Vùng Mũi Tên (VÀNG)
+            if let Some(arrow) = &cfg.arrow_region {
+                let yellow_pen = CreatePen(PS_SOLID.try_into().unwrap(), 2, 0x0000FFFF); 
+                let old_pen = SelectObject(hdc, yellow_pen as *mut winapi::ctypes::c_void);
+                let left = arrow.x - vx;
+                let top = arrow.y - vy;
+                let right = left + arrow.width as i32;
+                let bottom = top + arrow.height as i32;
+                winapi::um::wingdi::Rectangle(hdc, left, top, right, bottom);
+                let txt = to_wide("Mũi Tên");
+                SetTextColor(hdc, 0x0000FFFF);
+                TextOutW(hdc, left, top - 20, txt.as_ptr(), txt.len() as i32);
+                SelectObject(hdc, old_pen); DeleteObject(yellow_pen as *mut winapi::ctypes::c_void);
+            }
+
+            // 3. Vùng Dịch Nhanh (XANH)
+            if let Some(instant) = &cfg.instant_region {
+                let blue_pen = CreatePen(PS_SOLID.try_into().unwrap(), 2, 0x00FF0000);
+                let old_pen = SelectObject(hdc, blue_pen as *mut winapi::ctypes::c_void);
+                let left = instant.x - vx;
+                let top = instant.y - vy;
+                let right = left + instant.width as i32;
+                let bottom = top + instant.height as i32;
+                winapi::um::wingdi::Rectangle(hdc, left, top, right, bottom);
+                let txt = to_wide("Dịch Nhanh");
+                SetTextColor(hdc, 0x00FF0000);
+                TextOutW(hdc, left, top - 20, txt.as_ptr(), txt.len() as i32);
+                SelectObject(hdc, old_pen); DeleteObject(blue_pen as *mut winapi::ctypes::c_void);
+            }
+
+            SelectObject(hdc, old_brush);
+            EndPaint(hwnd, &mut ps); 0
+        }
+        WM_DESTROY => { PostQuitMessage(0); 0 }
+        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
 }
 
 // ========================================================
@@ -141,9 +278,6 @@ unsafe extern "system" fn selection_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARA
             } 0
         }
         WM_SETCURSOR => {
-            // QUAN TRỌNG: Check mode ở đây
-            // Mode 2 (Instant): Hiện con trỏ chuột (IDC_ARROW)
-            // Mode 0, 1: Ẩn con trỏ chuột (null) để hiện crosshair vẽ tay
             let mode = SELECTION_MODE.load(Ordering::Relaxed);
             if mode == 2 {
                 SetCursor(LoadCursorW(std::ptr::null_mut(), IDC_ARROW));
@@ -164,7 +298,6 @@ unsafe extern "system" fn selection_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARA
             
             let mode = SELECTION_MODE.load(Ordering::Relaxed);
 
-            // 1. Vẽ hình chữ nhật vùng chọn (Khi đang kéo chuột) - Áp dụng cho TẤT CẢ các mode
             if IS_DRAGGING {
                 let r = RECT { 
                     left: (START_POS.x.min(CURR_POS.x)) - vx, 
@@ -178,22 +311,14 @@ unsafe extern "system" fn selection_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARA
                 let b_br = CreateSolidBrush(0x00FFFFFF); FrameRect(mem_dc, &r, b_br); DeleteObject(b_br as *mut winapi::ctypes::c_void);
             }
 
-            // 2. Vẽ Long Crosshair (CHỈ VẼ KHI KHÔNG PHẢI MODE 2)
             if mode != 2 {
                 let cx = CURR_POS.x - vx;
                 let cy = CURR_POS.y - vy;
-                
                 let pen = CreatePen(PS_SOLID.try_into().unwrap(), 2, 0x000000FF); 
                 let old_pen = SelectObject(mem_dc, pen as *mut winapi::ctypes::c_void);
-
-                MoveToEx(mem_dc, 0, cy, std::ptr::null_mut());
-                LineTo(mem_dc, w, cy);
-
-                MoveToEx(mem_dc, cx, 0, std::ptr::null_mut());
-                LineTo(mem_dc, cx, h);
-
-                SelectObject(mem_dc, old_pen);
-                DeleteObject(pen as *mut winapi::ctypes::c_void);
+                MoveToEx(mem_dc, 0, cy, std::ptr::null_mut()); LineTo(mem_dc, w, cy);
+                MoveToEx(mem_dc, cx, 0, std::ptr::null_mut()); LineTo(mem_dc, cx, h);
+                SelectObject(mem_dc, old_pen); DeleteObject(pen as *mut winapi::ctypes::c_void);
             }
 
             BitBlt(hdc, 0, 0, w, h, mem_dc, 0, 0, SRCCOPY);
@@ -212,10 +337,6 @@ fn process_region(region: config::Region) {
     else if mode == 2 { config.instant_region = Some(region); }
     config.save().unwrap();
 }
-
-// ========================================================
-// HIGHLIGHT OVERLAY
-// ========================================================
 
 pub fn show_highlight(rect: RECT) {
     std::thread::spawn(move || {
@@ -262,8 +383,7 @@ unsafe extern "system" fn highlight_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARA
 
             let brush = CreateSolidBrush(0x0000FF00); 
             FrameRect(hdc, &r, brush);
-            let mut r2 = r;
-            r2.left += 1; r2.top += 1; r2.right -= 1; r2.bottom -= 1;
+            let mut r2 = r; r2.left += 1; r2.top += 1; r2.right -= 1; r2.bottom -= 1;
             FrameRect(hdc, &r2, brush);
 
             DeleteObject(brush as *mut winapi::ctypes::c_void);
@@ -288,7 +408,6 @@ pub fn show_result_window(target_rect: RECT, text: String, duration_ms: u32) {
         for hwnd in valid_hwnds { let mut rect = RECT { left: 0, top: 0, right: 0, bottom: 0 }; if GetWindowRect(hwnd, &mut rect) != 0 { MoveWindow(hwnd, rect.left, rect.top - height - 10, rect.right - rect.left, rect.bottom - rect.top, 1); } }
         let font_data = include_bytes!("roboto.ttf"); let _ = AddFontMemResourceEx(font_data.as_ptr() as *mut winapi::ctypes::c_void, font_data.len() as u32, std::ptr::null_mut(), &mut 0);
         
-        // Thêm WS_EX_NOACTIVATE để không chiếm focus bàn phím
         let hwnd = CreateWindowExW(
             WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, 
             class_name.as_ptr(), to_wide(&text).as_ptr(), WS_POPUP | WS_VISIBLE, x, y, width, height, std::ptr::null_mut(), std::ptr::null_mut(), instance, std::ptr::null_mut());

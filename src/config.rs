@@ -49,6 +49,8 @@ pub struct Config {
     pub auto_copy: bool,
     #[serde(default)]
     pub copy_instant_only: bool,
+    
+    // ĐÃ XÓA: minimize_to_tray
 }
 
 fn default_interval() -> f32 { 0.02 }
@@ -82,19 +84,15 @@ impl Default for Config {
 
 impl Config {
     pub fn get_wuxia_prompt() -> String {
-        "Perform OCR to extract all text from this image. Translate it into Vietnamese using wuxia novel vocabulary and tone. Make it concise. Provide ONLY the translated text.".to_string()
+        "Perform OCR to extract all text from this image, regardless of the source language. Then, translate the extracted text into Vietnamese. The translation must strictly use vocabulary and tone consistent with wuxia novels, make it as short as possible. Crucially, provide ONLY the translated text and nothing else. Do not include any introductory phrases, explanations, or conversational elements. Note: just output the translated text and make it as short as possible".to_string()
     }
 
-    // --- PROMPT ĐÃ ĐƯỢC TỐI ƯU THEO YÊU CẦU MỚI ---
     pub fn get_wuxia_speaker_prompt() -> String {
-        "Perform OCR. Check if there is a character name at the start. \
-        If yes: Analyze context to choose a Vietnamese verb (nói, hỏi, đáp, quát, cười, thầm nghĩ...) without brackets. Format: 'Name Verb: Content'. \
-        If no name found: Just translate the text normally. \
-        Constraint: Do NOT use quotation marks anywhere. Use wuxia vocabulary. Output ONLY the Vietnamese text.".to_string()
+        "Identify the character name at the beginning. Analyze the context/tone of the dialogue to choose a fitting Vietnamese verb (e.g., nói, hỏi, đáp, cười lạnh, quát...). Format the output strictly as: 'Name Verb: Vietnamese Translation'. Do NOT enclose the dialogue in quotation marks. Use wuxia novel vocabulary. Provide ONLY the translated result.".to_string()
     }
 
     pub fn get_normal_prompt() -> String {
-        "Perform OCR to extract all text visible in this image. Translate the extracted text directly into Vietnamese. Return only the Vietnamese translation, no introduction or notes.".to_string()
+        "Perform OCR to extract all text visible in this image, regardless of the original language. Then, translate the extracted text directly into Vietnamese. Return only the Vietnamese translation, no introduction or notes.".to_string()
     }
 }
 
