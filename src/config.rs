@@ -15,6 +15,16 @@ pub struct CustomPrompt {
     pub content: String, 
 }
 
+// --- MỚI: Cấu trúc cho vùng dịch phụ ---
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct AuxRegion {
+    pub id: usize,              // ID định danh (để xóa/sửa)
+    pub name: String,           // Tên hiển thị (VD: Vùng phụ 1)
+    pub region: Option<Region>, // Tọa độ vùng
+    pub hotkey_select: String,  // Phím tắt chọn vùng
+    pub hotkey_translate: String, // Phím tắt dịch
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Config {
     pub gemini_api_key: String,
@@ -40,6 +50,10 @@ pub struct Config {
     pub arrow_region: Option<Region>,
     pub instant_region: Option<Region>,
 
+    // --- MỚI: Danh sách các vùng dịch phụ ---
+    #[serde(default)]
+    pub aux_regions: Vec<AuxRegion>,
+
     pub selected_api: String,
     pub speed: f32,
 
@@ -55,6 +69,9 @@ pub struct Config {
 
     #[serde(default = "default_dark_mode")]
     pub is_dark_mode: bool,
+
+    #[serde(default)]
+    pub freeze_screen: bool,
 }
 
 fn default_interval() -> f32 { 0.02 }
@@ -73,22 +90,21 @@ impl Default for Config {
             hotkey_select: "]".to_string(),
             hotkey_instant: "\\".to_string(),
             hotkey_auto: ";".to_string(),
-            
-            // --- CÁC THAY ĐỔI MẶC ĐỊNH ---
-            split_tts: true,      // Mặc định bật
+            split_tts: true,
             use_tts: true,
-            show_overlay: true,   // Mặc định bật
-            speed: 1.45,          // Mặc định 1.45
-            
+            show_overlay: true,
+            speed: 1.45,
             fixed_regions: Vec::new(),
             arrow_region: None,
             instant_region: None,
+            aux_regions: Vec::new(), // Mặc định rỗng
             selected_api: "groq".to_string(),
             arrow_check_interval: 0.02,
             auto_copy: false,
             copy_instant_only: false,
             overlay_font_size: 24,
             is_dark_mode: true,
+            freeze_screen: false,
         }
     }
 }
@@ -98,12 +114,15 @@ impl Config {
         "Perform OCR to extract all text from this image, regardless of the source language. Then, translate the extracted text into Vietnamese. The translation must strictly use vocabulary and tone consistent with wuxia novels, make it as short as possible. Crucially, provide ONLY the translated text and nothing else. Do not include any introductory phrases, explanations, or conversational elements. Note: just output the translated text and make it as short as possible".to_string()
     }
 
-    // --- PROMPT ĐÃ SỬA LOGIC CÓ TÊN/KHÔNG TÊN ---
     pub fn get_wuxia_speaker_prompt() -> String {
-        "Perform OCR. Identify if there is a character name at the beginning. 
-        Case 1: If a Name exists, analyze context/tone to choose a fitting Vietnamese verb (e.g., nói, hỏi, đáp, cười lạnh, quát...). Format output as: 'Name Verb: Vietnamese Translation'.
-        Case 2: If NO Name exists, just output the 'Vietnamese Translation'.
-        Use wuxia novel vocabulary. Do NOT use quotation marks. Provide ONLY the result.".to_string()
+        "Perform OCR to extract text. Check if a character name appears at the start. 
+        1. If Name exists: Output format 'Name Verb: Translated Text'. (Choose verb based on context: nói, cười lạnh, quát, than...).
+        2. If NO Name exists: Output ONLY the 'Translated Text'.
+        CRITICAL RULES:
+        - Do NOT output phrases like 'No character name found', 'No name detected', or any explanations.
+        - If you are unsure, just output the translation.
+        - Translate to Vietnamese wuxia style (Kiếm hiệp).
+        - Do NOT use quotation marks.".to_string()
     }
 
     pub fn get_normal_prompt() -> String {
@@ -138,10 +157,7 @@ impl Config {
                     if config.arrow_check_interval > 0.2 { config.arrow_check_interval = 0.2; }
                     if config.overlay_font_size < 10 { config.overlay_font_size = 10; }
                     if config.overlay_font_size > 72 { config.overlay_font_size = 72; }
-                    
-                    // Đảm bảo split_tts luôn bật nếu người dùng lỡ sửa file config thủ công
                     config.split_tts = true; 
-                    
                     config
                 },
                 Err(_) => Self::default(),

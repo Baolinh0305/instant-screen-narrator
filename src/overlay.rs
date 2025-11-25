@@ -1,4 +1,4 @@
-use winapi::shared::windef::{POINT, RECT, HWND, SIZE};
+use winapi::shared::windef::{POINT, RECT, HWND, SIZE, HBITMAP, HBRUSH};
 use winapi::shared::minwindef::{WPARAM, LPARAM, LRESULT};
 use winapi::um::winuser::{
     GetSystemMetrics, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SM_CXVIRTUALSCREEN,
@@ -13,14 +13,15 @@ use winapi::um::winuser::{
     DT_WORDBREAK, SetTimer, KillTimer, WM_TIMER, GetDC, ReleaseDC, DT_CALCRECT,
     SetCursor, WM_SETCURSOR, TrackMouseEvent, TRACKMOUSEEVENT, TME_LEAVE, WM_MOUSELEAVE,
     GetWindowRect, ShowWindow, SW_SHOW, IsWindow,
-    WS_EX_NOACTIVATE, UpdateWindow, WS_EX_TRANSPARENT
+    WS_EX_NOACTIVATE, UpdateWindow, WS_EX_TRANSPARENT, DT_CENTER, DT_VCENTER, DT_SINGLELINE
 };
 use winapi::um::wingdi::{
     CreateCompatibleDC, CreateCompatibleBitmap, SelectObject, DeleteObject, DeleteDC,
     BitBlt, SRCCOPY, CreateSolidBrush, SetTextColor, CreateFontW, SetBkMode,
     CreateRoundRectRgn, AddFontMemResourceEx, FrameRgn, FillRgn,
     GetTextExtentPoint32W, SetTextJustification, TextOutW,
-    MoveToEx, LineTo, CreatePen, PS_SOLID, TRANSPARENT
+    MoveToEx, LineTo, CreatePen, PS_SOLID, TRANSPARENT, PS_INSIDEFRAME,
+    PatBlt, SRCAND
 };
 use winapi::um::winuser::MoveWindow;
 use std::sync::Mutex;
@@ -46,6 +47,8 @@ static HOVER_MAP: OnceLock<Mutex<HashMap<usize, bool>>> = OnceLock::new();
 static SELECTION_MODE: AtomicU8 = AtomicU8::new(0); 
 static DEBUG_ACTIVE: AtomicBool = AtomicBool::new(false);
 static CURRENT_FONT_SIZE: AtomicI32 = AtomicI32::new(24);
+
+static mut FROZEN_BITMAP: HBITMAP = std::ptr::null_mut();
 
 pub fn set_selection_mode(mode: u8) {
     SELECTION_MODE.store(mode, Ordering::Relaxed);
@@ -86,7 +89,6 @@ unsafe fn break_text_into_lines(hdc: winapi::shared::windef::HDC, text: &[u16], 
     lines
 }
 
-// ... (Giữ nguyên phần toggle_debug_overlay và debug_wnd_proc) ...
 pub fn toggle_debug_overlay() {
     let current = DEBUG_ACTIVE.load(Ordering::Relaxed);
     if current {
@@ -214,10 +216,30 @@ unsafe extern "system" fn debug_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, l
     }
 }
 
-// ... (Giữ nguyên phần selection_overlay) ...
 pub fn show_selection_overlay() {
     unsafe {
         IS_DRAGGING = false;
+        let config = config::Config::load(); 
+
+        FROZEN_BITMAP = std::ptr::null_mut(); 
+        if config.freeze_screen {
+            let x = GetSystemMetrics(SM_XVIRTUALSCREEN);
+            let y = GetSystemMetrics(SM_YVIRTUALSCREEN);
+            let w = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+            let h = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+            
+            let hdc_screen = GetDC(std::ptr::null_mut());
+            let hdc_mem = CreateCompatibleDC(hdc_screen);
+            let hbm = CreateCompatibleBitmap(hdc_screen, w, h);
+            SelectObject(hdc_mem, hbm as *mut _);
+            BitBlt(hdc_mem, 0, 0, w, h, hdc_screen, x, y, SRCCOPY);
+            
+            FROZEN_BITMAP = hbm;
+            
+            DeleteDC(hdc_mem);
+            ReleaseDC(std::ptr::null_mut(), hdc_screen);
+        }
+
         let instance = GetModuleHandleW(std::ptr::null());
         let class_name = to_wide("SnippingOverlay");
         let mut wc: WNDCLASSW = std::mem::zeroed();
@@ -232,8 +254,14 @@ pub fn show_selection_overlay() {
         let w = GetSystemMetrics(SM_CXVIRTUALSCREEN);
         let h = GetSystemMetrics(SM_CYVIRTUALSCREEN);
 
-        let hwnd = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW, class_name.as_ptr(), to_wide("Snipping").as_ptr(), WS_POPUP, x, y, w, h, std::ptr::null_mut(), std::ptr::null_mut(), instance, std::ptr::null_mut());
-        SetLayeredWindowAttributes(hwnd, 0x00FF00FF, 100, LWA_ALPHA | LWA_COLORKEY);
+        let ex_style = WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW;
+        let hwnd = CreateWindowExW(ex_style, class_name.as_ptr(), to_wide("Snipping").as_ptr(), WS_POPUP, x, y, w, h, std::ptr::null_mut(), std::ptr::null_mut(), instance, std::ptr::null_mut());
+        
+        if config.freeze_screen {
+             SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA);
+        } else {
+             SetLayeredWindowAttributes(hwnd, 0x00FF00FF, 100, LWA_ALPHA | LWA_COLORKEY);
+        }
         
         GetCursorPos(std::ptr::addr_of_mut!(CURR_POS));
         ShowWindow(hwnd, SW_SHOW);
@@ -243,6 +271,12 @@ pub fn show_selection_overlay() {
             TranslateMessage(&msg); DispatchMessageW(&msg);
             if msg.message == WM_CLOSE { break; }
         }
+        
+        if !FROZEN_BITMAP.is_null() {
+            DeleteObject(FROZEN_BITMAP as *mut _);
+            FROZEN_BITMAP = std::ptr::null_mut();
+        }
+        
         UnregisterClassW(class_name.as_ptr(), instance);
     }
 }
@@ -290,21 +324,83 @@ unsafe extern "system" fn selection_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARA
             let vx = GetSystemMetrics(SM_XVIRTUALSCREEN); let vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
 
             let mem_bm = CreateCompatibleBitmap(hdc, w, h); SelectObject(mem_dc, mem_bm as *mut winapi::ctypes::c_void);
-            let bg_brush = CreateSolidBrush(0x00000000); FillRect(mem_dc, &RECT{left:0,top:0,right:w,bottom:h}, bg_brush); DeleteObject(bg_brush as *mut winapi::ctypes::c_void);
-            
             let mode = SELECTION_MODE.load(Ordering::Relaxed);
 
-            if IS_DRAGGING {
-                let r = RECT { 
-                    left: (START_POS.x.min(CURR_POS.x)) - vx, 
-                    top: (START_POS.y.min(CURR_POS.y)) - vy, 
-                    right: (START_POS.x.max(CURR_POS.x)) - vx, 
-                    bottom: (START_POS.y.max(CURR_POS.y)) - vy 
-                };
+            if !FROZEN_BITMAP.is_null() {
+                // === CHẾ ĐỘ ĐÓNG BĂNG (Freeze Mode) ===
+                let hdc_src = CreateCompatibleDC(hdc);
+                SelectObject(hdc_src, FROZEN_BITMAP as *mut _);
                 
-                let color = if mode == 1 { 0x00FFFF00 } else if mode == 2 { 0x000080FF } else { 0x00FF00FF };
-                let k_br = CreateSolidBrush(color); FillRect(mem_dc, &r, k_br); DeleteObject(k_br as *mut winapi::ctypes::c_void);
-                let b_br = CreateSolidBrush(0x00FFFFFF); FrameRect(mem_dc, &r, b_br); DeleteObject(b_br as *mut winapi::ctypes::c_void);
+                // 1. Vẽ toàn bộ ảnh gốc (sáng) vào bộ nhớ đệm
+                BitBlt(mem_dc, 0, 0, w, h, hdc_src, 0, 0, SRCCOPY);
+                
+                // 2. Làm RẤT TỐI (Dim) toàn bộ màn hình
+                // Mã màu 0x00404040 sẽ giữ lại 25% độ sáng (rất tối)
+                let dim_brush = CreateSolidBrush(0x00404040); 
+                let old_brush = SelectObject(mem_dc, dim_brush as *mut _);
+                PatBlt(mem_dc, 0, 0, w, h, SRCAND); 
+                SelectObject(mem_dc, old_brush);
+                DeleteObject(dim_brush as *mut _);
+
+                // 3. Vẽ viền xanh dương bao quanh màn hình để biết đang đóng băng
+                let pen_screen_border = CreatePen(PS_INSIDEFRAME as i32, 6, 0x00FF0000); // Xanh dương (BGR: Red=0, Green=0, Blue=255) -> 0x00FF0000
+                let old_pen_border = SelectObject(mem_dc, pen_screen_border as *mut _);
+                let null_brush = winapi::um::wingdi::GetStockObject(winapi::um::wingdi::NULL_BRUSH as i32);
+                let old_br_border = SelectObject(mem_dc, null_brush);
+                winapi::um::wingdi::Rectangle(mem_dc, 0, 0, w, h);
+                SelectObject(mem_dc, old_br_border);
+                SelectObject(mem_dc, old_pen_border);
+                DeleteObject(pen_screen_border as *mut _);
+
+                // 4. Nếu ĐANG kéo chuột: Vẽ lại vùng chọn SÁNG đè lên nền tối
+                if IS_DRAGGING {
+                     let r = RECT { 
+                        left: (START_POS.x.min(CURR_POS.x)) - vx, 
+                        top: (START_POS.y.min(CURR_POS.y)) - vy, 
+                        right: (START_POS.x.max(CURR_POS.x)) - vx, 
+                        bottom: (START_POS.y.max(CURR_POS.y)) - vy 
+                    };
+
+                    // Copy lại phần ảnh sáng từ hdc_src
+                    BitBlt(mem_dc, r.left, r.top, r.right - r.left, r.bottom - r.top, 
+                           hdc_src, r.left, r.top, SRCCOPY);
+                    
+                    // Vẽ viền màu cho vùng chọn
+                    let color = if mode == 1 { 0x00FFFF00 } else if mode == 2 { 0x000080FF } else { 0x00FF00FF };
+                    let pen_border = CreatePen(PS_SOLID.try_into().unwrap(), 2, color);
+                    let old_pen = SelectObject(mem_dc, pen_border as *mut _);
+                    let old_br = SelectObject(mem_dc, null_brush);
+                    
+                    winapi::um::wingdi::Rectangle(mem_dc, r.left, r.top, r.right, r.bottom);
+                    
+                    SelectObject(mem_dc, old_br);
+                    SelectObject(mem_dc, old_pen);
+                    DeleteObject(pen_border as *mut _);
+                }
+
+                DeleteDC(hdc_src);
+
+            } else {
+                // === CHẾ ĐỘ THƯỜNG ===
+                let bg_brush = CreateSolidBrush(0x00000000); 
+                FillRect(mem_dc, &RECT{left:0,top:0,right:w,bottom:h}, bg_brush); 
+                DeleteObject(bg_brush as *mut winapi::ctypes::c_void);
+
+                if IS_DRAGGING {
+                    let r = RECT { 
+                        left: (START_POS.x.min(CURR_POS.x)) - vx, 
+                        top: (START_POS.y.min(CURR_POS.y)) - vy, 
+                        right: (START_POS.x.max(CURR_POS.x)) - vx, 
+                        bottom: (START_POS.y.max(CURR_POS.y)) - vy 
+                    };
+                    
+                    let color = if mode == 1 { 0x00FFFF00 } else if mode == 2 { 0x000080FF } else { 0x00FF00FF };
+                    let k_br = CreateSolidBrush(color); 
+                    FillRect(mem_dc, &r, k_br); 
+                    DeleteObject(k_br as *mut winapi::ctypes::c_void);
+
+                    let b_br = CreateSolidBrush(0x00FFFFFF); FrameRect(mem_dc, &r, b_br); DeleteObject(b_br as *mut winapi::ctypes::c_void);
+                }
             }
 
             if mode != 2 {
@@ -328,13 +424,23 @@ unsafe extern "system" fn selection_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARA
 fn process_region(region: config::Region) {
     let mut config = config::Config::load();
     let mode = SELECTION_MODE.load(Ordering::Relaxed);
-    if mode == 0 { config.fixed_regions.clear(); config.fixed_regions.push(region); }
-    else if mode == 1 { config.arrow_region = Some(region); }
-    else if mode == 2 { config.instant_region = Some(region); }
+    
+    if mode == 0 { 
+        config.fixed_regions.clear(); 
+        config.fixed_regions.push(region); 
+    } else if mode == 1 { 
+        config.arrow_region = Some(region); 
+    } else if mode == 2 { 
+        config.instant_region = Some(region); 
+    } else if mode >= 100 {
+        let idx = (mode - 100) as usize;
+        if idx < config.aux_regions.len() {
+            config.aux_regions[idx].region = Some(region);
+        }
+    }
     config.save().unwrap();
 }
 
-// --- ĐÃ SỬA: LOGIC VẼ HIGHLIGHT ---
 pub fn show_highlight(rect: RECT) {
     std::thread::spawn(move || {
         unsafe {
@@ -344,7 +450,6 @@ pub fn show_highlight(rect: RECT) {
             wc.lpfnWndProc = Some(highlight_wnd_proc);
             wc.hInstance = instance;
             wc.lpszClassName = class_name.as_ptr();
-            // Dùng brush màu xanh lá nhạt để tô nền (cho dễ nhìn)
             wc.hbrBackground = CreateSolidBrush(0x0000FF00); 
             RegisterClassW(&wc);
 
@@ -355,10 +460,7 @@ pub fn show_highlight(rect: RECT) {
                 std::ptr::null_mut(), std::ptr::null_mut(), instance, std::ptr::null_mut()
             );
 
-            // LWA_ALPHA = 0x00000002. Đặt độ trong suốt là 100/255 (~40% opacity)
             SetLayeredWindowAttributes(hwnd, 0, 100, 0x00000002);
-            
-            // Tăng thời gian hiển thị lên 3000ms (3 giây)
             SetTimer(hwnd, 999, 3000, None);
 
             let mut msg: MSG = std::mem::zeroed();
@@ -378,17 +480,12 @@ unsafe extern "system" fn highlight_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARA
             let hdc = BeginPaint(hwnd, &mut ps);
             let mut r: RECT = std::mem::zeroed(); GetClientRect(hwnd, &mut r);
             
-            // 1. Vẽ nền (đã có màu xanh lá từ hbrBackground + LWA_ALPHA)
-            // Nhưng để chắc chắn ta fill lại 1 màu cụ thể, ví dụ màu xanh lá mạ 0x0090EE90 (WinAPI GDI là 0x00GGBBRR)
-            // Xanh lá chuẩn: 0x0000FF00.
             let fill_brush = CreateSolidBrush(0x0000FF00);
             FillRect(hdc, &r, fill_brush);
             DeleteObject(fill_brush as *mut winapi::ctypes::c_void);
 
-            // 2. Vẽ khung viền đậm
-            let border_brush = CreateSolidBrush(0x000000FF); // Màu đỏ 
+            let border_brush = CreateSolidBrush(0x000000FF); 
             FrameRect(hdc, &r, border_brush);
-            // Vẽ viền dày 3px
             let mut r2 = r; r2.left += 1; r2.top += 1; r2.right -= 1; r2.bottom -= 1;
             FrameRect(hdc, &r2, border_brush);
             let mut r3 = r2; r3.left += 1; r3.top += 1; r3.right -= 1; r3.bottom -= 1;
@@ -403,7 +500,6 @@ unsafe extern "system" fn highlight_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARA
     }
 }
 
-// ... (Giữ nguyên show_result_window và result_wnd_proc) ...
 static REGISTER_RESULT_CLASS: Once = Once::new();
 pub fn show_result_window(target_rect: RECT, text: String, duration_ms: u32) {
     unsafe {
