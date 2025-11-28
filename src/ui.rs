@@ -205,33 +205,51 @@ pub trait UiRenderer {
 impl UiRenderer for super::MainApp {
     fn render_header(&mut self, ui: &mut egui::Ui) {
         ui.vertical_centered(|ui| {
-            ui.horizontal(|ui| {
-                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center).with_main_align(egui::Align::Center), |ui| {
-                    ui.heading(egui::RichText::new(APP_NAME).strong().size(24.0));
-                    ui.add_space(10.0);
-                    if ui.button(egui::RichText::new("👤 Tạo bởi: Baolinh0305").small()).clicked() {
-                          let _ = webbrowser::open("https://github.com/Baolinh0305/instant-screen-narrator/releases");
-                    }
-                    ui.add_space(10.0);
-
-                    if ui.button(egui::RichText::new("🔄 Reset").small().color(egui::Color32::RED)).clicked() {
-                        self.ui_state.show_reset_confirm = true;
-                    }
-                    // ---> THÊM NÚT NÀY <---
-                    ui.add_space(5.0);
-                    if ui.button(egui::RichText::new("📖 Đọc văn bản").small().strong()).clicked() {
-                         self.ui_state.reader.is_open = true;
-                    }
-
-                    let theme_text = if self.config_state.config.is_dark_mode { "🌗 Theme: Tối" } else { "🌗 Theme: Sáng" };
-                    if ui.button(egui::RichText::new(theme_text).small()).clicked() {
-                        self.config_state.config.is_dark_mode = !self.config_state.config.is_dark_mode;
-                        self.config_state.config.save().unwrap();
-                    }
-                });
-            });
-            ui.add_space(10.0);
+            ui.heading(egui::RichText::new(APP_NAME).strong().size(24.0));
         });
+        ui.add_space(5.0);
+
+        // Layout ngang, các phần tử sẽ nằm từ trái sang phải
+        ui.horizontal(|ui| {
+            // 1. Checkbox Listening (Đổi tên thành "Nghe phím")
+            let mut listening = !self.is_paused;
+            if ui.checkbox(&mut listening, "✅ Nghe phím").changed() {
+                self.is_paused = !listening;
+                crate::LISTENING_PAUSED.store(self.is_paused, Ordering::Relaxed);
+                if self.is_paused {
+                    self.wwm_state.auto_translate_active = false;
+                    AUTO_TRANSLATE_ENABLED.store(false, Ordering::Relaxed);
+                }
+            }
+
+            // 2. Nút Ẩn vào Tray (Đổi tên thành "Ẩn")
+            if ui.button("🔽 Ẩn").clicked() {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            }
+
+            ui.separator();
+
+            // Các nút tiện ích khác
+            if ui.button(egui::RichText::new("📖 Đọc văn bản").small().strong()).clicked() {
+                 self.ui_state.reader.is_open = true;
+            }
+
+            let theme_text = if self.config_state.config.is_dark_mode { "🌗 Tối" } else { "🌗 Sáng" };
+            if ui.button(egui::RichText::new(theme_text).small()).clicked() {
+                self.config_state.config.is_dark_mode = !self.config_state.config.is_dark_mode;
+                self.config_state.config.save().unwrap();
+            }
+
+            if ui.button(egui::RichText::new("🔄 Reset").small().color(egui::Color32::RED)).clicked() {
+                self.ui_state.show_reset_confirm = true;
+            }
+
+            // Đổi tên thành "by Baolinh0305"
+            if ui.button(egui::RichText::new("👤 by Baolinh0305").small()).clicked() {
+                  let _ = webbrowser::open("https://github.com/Baolinh0305/instant-screen-narrator/releases");
+            }
+        });
+        ui.add_space(5.0);
     }
 
     fn render_api_section(&mut self, ui: &mut egui::Ui) {
@@ -682,37 +700,9 @@ impl UiRenderer for super::MainApp {
                         }
                     });
                 });
-                ui.add_space(5.0);
+                // Đã xóa ui.add_space(5.0) ở cuối để sát lề dưới
             }); // End CollapsingHeader
         }); // End vertical_centered
-
-        ui.add_space(10.0);
-
-        // --- ĐÃ SỬA: Đưa các nút ra khỏi vertical_centered và căn trái, xếp dọc ---
-        // Sử dụng top_down(Align::Min) để căn trái tuyệt đối
-        ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-            // Checkbox Listening
-            let mut listening = !self.is_paused;
-            if ui.checkbox(&mut listening, "✅ Đang lắng nghe phím tắt (Listening)").changed() {
-                self.is_paused = !listening;
-                crate::LISTENING_PAUSED.store(self.is_paused, Ordering::Relaxed);
-                if self.is_paused {
-                    self.wwm_state.auto_translate_active = false;
-                    AUTO_TRANSLATE_ENABLED.store(false, Ordering::Relaxed);
-                }
-            }
-
-            ui.add_space(10.0);
-
-            // Nút Ẩn vào Tray (Nằm ở dòng mới, căn trái)
-            let tray_btn = egui::Button::new(egui::RichText::new("🔽 Ẩn vào Tray").size(16.0).strong())
-                .min_size(egui::vec2(120.0, 40.0));
-            if ui.add(tray_btn).clicked() {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-            }
-        });
-
-        ui.add_space(10.0);
     }
 
     fn sync_config_from_file(&mut self) {

@@ -209,7 +209,14 @@ impl MainApp {
 
         let mut style = (*ctx.style()).clone();
         style.spacing.item_spacing = egui::vec2(6.0, 6.0);
-        style.spacing.window_margin = egui::Margin::same(8.0);
+
+        // --- THAY ĐỔI Ở ĐÂY: Chỉnh margin dưới về 0 ---
+        style.spacing.window_margin = egui::Margin {
+            left: 8.0,
+            right: 8.0,
+            top: 8.0,
+            bottom: 0.0, // Để sát cạnh dưới
+        };
 
         style.visuals.widgets.noninteractive.rounding = egui::Rounding::same(4.0);
         style.visuals.widgets.inactive.rounding = egui::Rounding::same(4.0);

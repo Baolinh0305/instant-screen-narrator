@@ -75,7 +75,7 @@ pub struct Config {
 
 fn default_interval() -> f32 { 0.02 }
 fn default_font_size() -> i32 { 24 }
-fn default_dark_mode() -> bool { true }
+fn default_dark_mode() -> bool { false }
 
 impl Default for Config {
     fn default() -> Self {
@@ -103,7 +103,7 @@ impl Default for Config {
             auto_copy: false,
             copy_instant_only: false,
             overlay_font_size: 24,
-            is_dark_mode: true,
+            is_dark_mode: false,
             freeze_screen: false,
         }
     }
