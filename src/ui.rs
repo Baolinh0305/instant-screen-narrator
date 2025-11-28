@@ -127,6 +127,7 @@ pub struct HotkeyState {
     pub hotkey_select: String,
     pub hotkey_instant: String,
     pub hotkey_auto: String,
+    pub hotkey_toggle_auto: String,
 }
 
 #[derive(Clone)]
@@ -171,6 +172,7 @@ impl HotkeyState {
             hotkey_select: config.hotkey_select.clone(),
             hotkey_instant: config.hotkey_instant.clone(),
             hotkey_auto: config.hotkey_auto.clone(),
+            hotkey_toggle_auto: config.hotkey_toggle_auto.clone(),
         }
     }
 }
@@ -251,15 +253,6 @@ impl UiRenderer for super::MainApp {
                             }
                         });
 
-                    if self.config_state.selected_api == "groq" {
-                        let remaining = crate::GROQ_REMAINING.load(Ordering::Relaxed);
-                        if remaining >= 0 {
-                            ui.colored_label(egui::Color32::GREEN, format!("(Còn lại: {} req)", remaining));
-                        } else {
-                            ui.colored_label(egui::Color32::GRAY, "(Còn lại: ?)");
-                        }
-                    }
-
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let help_text = if self.config_state.selected_api == "gemini" { "❓ Hướng dẫn (Gemini)" } else { "❓ Hướng dẫn (Groq)" };
                         if ui.add(egui::Button::new(egui::RichText::new(help_text).small())).clicked() {
@@ -270,46 +263,25 @@ impl UiRenderer for super::MainApp {
                 });
                 ui.end_row();
 
-                ui.label("API Key(s):");
+                ui.label("API Key:");
                 ui.vertical(|ui| {
+                      let show_pass = self.ui_state.show_password;
+
                       if self.config_state.selected_api == "gemini" {
-                          if ui.add(egui::TextEdit::singleline(&mut self.config_state.gemini_api_key).password(!self.ui_state.show_password).desired_width(400.0)).changed() {
+                          if ui.add(egui::TextEdit::singleline(&mut self.config_state.gemini_api_key).password(!show_pass).desired_width(400.0)).changed() {
                               self.config_state.config.gemini_api_key = self.config_state.gemini_api_key.clone();
                               self.config_state.config.save().unwrap();
                           }
                       } else {
-                          let mut keys_to_remove = Vec::new();
-                          let show_pass = self.ui_state.show_password;
-                          let keys_count = self.config_state.config.groq_api_keys.len();
-
-                          let mut should_save = false;
-
-                          for (i, key) in self.config_state.config.groq_api_keys.iter_mut().enumerate() {
-                              ui.horizontal(|ui| {
-                                  ui.label(format!("#{}", i + 1));
-                                  if ui.add(egui::TextEdit::singleline(key).password(!show_pass).desired_width(350.0)).changed() {
-                                      should_save = true;
-                                  }
-                                  if keys_count > 1 {
-                                      if ui.button("🗑").clicked() { keys_to_remove.push(i); }
-                                  }
-                              });
-                          }
-
-                          if !keys_to_remove.is_empty() {
-                              for i in keys_to_remove.iter().rev() {
-                                  self.config_state.config.groq_api_keys.remove(*i);
-                              }
-                              should_save = true;
-                          }
-
-                          if ui.button("➕ Thêm Key dự phòng").clicked() {
+                          // --- ĐÃ SỬA: Chỉ hiện 1 key duy nhất, xóa chức năng thêm key dự phòng ---
+                          if self.config_state.config.groq_api_keys.is_empty() {
                               self.config_state.config.groq_api_keys.push(String::new());
-                              should_save = true;
                           }
 
-                          if should_save {
-                              self.config_state.config.save().unwrap();
+                          if let Some(key) = self.config_state.config.groq_api_keys.get_mut(0) {
+                              if ui.add(egui::TextEdit::singleline(key).password(!show_pass).desired_width(400.0)).changed() {
+                                  self.config_state.config.save().unwrap();
+                              }
                           }
                       }
 
@@ -425,6 +397,7 @@ impl UiRenderer for super::MainApp {
                  draw_bind_btn("Dịch vùng đã chọn:", BindingTarget::Translate, &self.hotkey_state.hotkey_translate);
                  draw_bind_btn("Chọn vùng dịch:", BindingTarget::Select, &self.hotkey_state.hotkey_select);
                  draw_bind_btn("Chụp & Dịch ngay:", BindingTarget::Instant, &self.hotkey_state.hotkey_instant);
+                 draw_bind_btn("Bật/Tắt Tự động dịch:", BindingTarget::ToggleAuto, &self.hotkey_state.hotkey_toggle_auto);
             });
         });
     }
@@ -547,6 +520,7 @@ impl UiRenderer for super::MainApp {
     }
 
     fn render_wwm_section(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+        // Giữ nguyên phần đầu là vertical_centered cho các nút chức năng chính
         ui.vertical_centered(|ui| {
             egui::CollapsingHeader::new(egui::RichText::new("🎮 Dịch Where Winds Meet").strong()).default_open(true).show(ui, |ui| {
                 ui.add_space(5.0);
@@ -709,34 +683,36 @@ impl UiRenderer for super::MainApp {
                     });
                 });
                 ui.add_space(5.0);
-            });
+            }); // End CollapsingHeader
+        }); // End vertical_centered
+
+        ui.add_space(10.0);
+
+        // --- ĐÃ SỬA: Đưa các nút ra khỏi vertical_centered và căn trái, xếp dọc ---
+        // Sử dụng top_down(Align::Min) để căn trái tuyệt đối
+        ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+            // Checkbox Listening
+            let mut listening = !self.is_paused;
+            if ui.checkbox(&mut listening, "✅ Đang lắng nghe phím tắt (Listening)").changed() {
+                self.is_paused = !listening;
+                crate::LISTENING_PAUSED.store(self.is_paused, Ordering::Relaxed);
+                if self.is_paused {
+                    self.wwm_state.auto_translate_active = false;
+                    AUTO_TRANSLATE_ENABLED.store(false, Ordering::Relaxed);
+                }
+            }
 
             ui.add_space(10.0);
 
-            ui.horizontal(|ui| {
-                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center).with_main_align(egui::Align::Center), |ui| {
-                    // Checkbox Pause/Resume
-                    let mut listening = !self.is_paused;
-                    if ui.checkbox(&mut listening, "✅ Đang lắng nghe phím tắt (Listening)").changed() {
-                        self.is_paused = !listening;
-                        crate::LISTENING_PAUSED.store(self.is_paused, Ordering::Relaxed);
-                        if self.is_paused {
-                            self.wwm_state.auto_translate_active = false;
-                            AUTO_TRANSLATE_ENABLED.store(false, Ordering::Relaxed);
-                        }
-                    }
-
-                    ui.add_space(20.0);
-
-                    let tray_btn = egui::Button::new(egui::RichText::new("🔽 Ẩn vào Tray").size(16.0).strong())
-                        .min_size(egui::vec2(120.0, 40.0));
-                    if ui.add(tray_btn).clicked() {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                    }
-                });
-            });
-            ui.add_space(10.0);
+            // Nút Ẩn vào Tray (Nằm ở dòng mới, căn trái)
+            let tray_btn = egui::Button::new(egui::RichText::new("🔽 Ẩn vào Tray").size(16.0).strong())
+                .min_size(egui::vec2(120.0, 40.0));
+            if ui.add(tray_btn).clicked() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            }
         });
+
+        ui.add_space(10.0);
     }
 
     fn sync_config_from_file(&mut self) {
@@ -761,6 +737,7 @@ impl UiRenderer for super::MainApp {
                             BindingTarget::Select => { self.hotkey_state.hotkey_select = key_name.clone(); self.config_state.config.hotkey_select = key_name; }
                             BindingTarget::Instant => { self.hotkey_state.hotkey_instant = key_name.clone(); self.config_state.config.hotkey_instant = key_name; }
                             BindingTarget::Auto => { self.hotkey_state.hotkey_auto = key_name.clone(); self.config_state.config.hotkey_auto = key_name; }
+                            BindingTarget::ToggleAuto => { self.hotkey_state.hotkey_toggle_auto = key_name.clone(); self.config_state.config.hotkey_toggle_auto = key_name; }
                             // --- BINDING AUX REGIONS ---
                             BindingTarget::AuxSelect(idx) => {
                                 if idx < self.config_state.config.aux_regions.len() {

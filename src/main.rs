@@ -108,6 +108,7 @@ pub enum BindingTarget {
     Select,
     Instant,
     Auto,
+    ToggleAuto,
     AuxSelect(usize),
     AuxTranslate(usize),
 }
@@ -410,10 +411,12 @@ impl MainApp {
                     let k2 = crate::key_utils::get_vk_from_name(&cfg.hotkey_select);
                     let k3 = crate::key_utils::get_vk_from_name(&cfg.hotkey_instant);
                     let k4 = crate::key_utils::get_vk_from_name(&cfg.hotkey_auto);
+                    let k5 = crate::key_utils::get_vk_from_name(&cfg.hotkey_toggle_auto);
                     if k1 > 0 { RegisterHotKey(hwnd, 1, 0, k1 as UINT); }
                     if k2 > 0 { RegisterHotKey(hwnd, 2, 0, k2 as UINT); }
                     if k3 > 0 { RegisterHotKey(hwnd, 3, 0, k3 as UINT); }
                     if k4 > 0 { RegisterHotKey(hwnd, 4, 0, k4 as UINT); }
+                    if k5 > 0 { RegisterHotKey(hwnd, 5, 0, k5 as UINT); }
 
                     // --- AUX REGIONS KEYS ---
                     for (i, aux) in cfg.aux_regions.iter().enumerate() {
@@ -475,7 +478,11 @@ impl MainApp {
                                         overlay::set_selection_mode(1); std::thread::spawn(|| { overlay::show_selection_overlay(); OVERLAY_ACTIVE.store(false, Ordering::Relaxed); });
                                     }
                                 }
-                            } 
+                            } else if id == 5 { // Toggle Auto
+                                let current_state = AUTO_TRANSLATE_ENABLED.load(Ordering::Relaxed);
+                                AUTO_TRANSLATE_ENABLED.store(!current_state, Ordering::Relaxed);
+                                // (Không cần làm gì thêm, hàm update() sẽ tự sync UI)
+                            }
                             // --- AUX REGIONS KEYS ---
                             else if id >= 100 && id < 200 { // Select Aux
                                 let idx = (id - 100) as usize;
@@ -613,6 +620,10 @@ impl eframe::App for MainApp {
             self.check_key_binding();
             ctx.request_repaint();
         }
+
+        // SYNC UI: Đảm bảo nút "Bật Tự Động Dịch" hiển thị đúng theo biến Global
+        // Nếu dùng phím tắt để tắt/bật thì nút trên giao diện phải đổi màu theo
+        self.wwm_state.auto_translate_active = AUTO_TRANSLATE_ENABLED.load(Ordering::Relaxed);
 
         if self.last_config_sync.elapsed() > Duration::from_secs(CONFIG_SYNC_INTERVAL_SECS) {
             self.sync_config_from_file();
@@ -763,7 +774,12 @@ impl eframe::App for MainApp {
 fn main() -> Result<(), eframe::Error> {
     let mut options = eframe::NativeOptions::default();
     options.viewport.transparent = Some(false);
-    options.viewport.inner_size = Some(egui::vec2(900.0, 950.0));
+
+    // --- THAY ĐỔI Ở ĐÂY ---
+    // Cũ: options.viewport.inner_size = Some(egui::vec2(900.0, 950.0));
+    options.viewport.inner_size = Some(egui::vec2(1245.0, 855.0));
+    // ---------------------
+
     options.viewport.position = Some(egui::pos2(0.0, 0.0));
 
     let icon_bytes = include_bytes!("icon2.ico");
