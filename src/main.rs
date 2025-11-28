@@ -137,12 +137,11 @@ pub struct MainApp {
 
     pub reader_rx: Receiver<ReaderSignal>,
     pub reader_tx: Sender<ReaderSignal>,
-
+    
     // --- State cho Reader ---
-    // SỬA: Lưu thêm usize (index) vào buffer để biết buffer này thuộc về câu nào
-    pub next_audio_buffer: Option<(Vec<u8>, usize)>,
-    pub is_downloading_next: bool,          // Đang tải (bất kỳ câu nào)?
-    pub is_playing_audio: bool,             // Đang phát audio?
+    pub next_audio_buffer: Option<(Vec<u8>, usize)>, // SỬA: Lưu thêm index để kiểm tra
+    pub is_downloading_next: bool,          
+    pub is_playing_audio: bool,             
 
     _tray_icon: TrayIcon,
     rx_signal: Receiver<AppSignal>,
@@ -170,7 +169,7 @@ impl MainApp {
             }
         });
 
-        let (r_tx, r_rx) = std::sync::mpsc::channel(); // Tạo channel cho Reader
+        let (r_tx, r_rx) = std::sync::mpsc::channel();
 
         let mut app = Self {
             ui_state: ui::UiState::new(),
@@ -519,7 +518,7 @@ impl eframe::App for MainApp {
         }
 
         // --- READER LOGIC (QUEUEING & PREFETCH) ---
-        // SỬA: Logic kiểm tra buffer để khắc phục lỗi Tạm dừng
+        // SỬA: Kiểm tra buffer có đúng là buffer của câu hiện tại không
         let current_idx = self.ui_state.reader.current_index;
         let has_buffer_for_current = self.next_audio_buffer.as_ref().map_or(false, |(_, i)| *i == current_idx);
 
@@ -566,7 +565,7 @@ impl eframe::App for MainApp {
                              self.spawn_download(next_text, self.ui_state.reader.current_index + 1);
                              self.is_downloading_next = true;
                         }
-                    }
+                    } 
                     // Nếu dữ liệu tải về là của câu tiếp theo (Pre-fetch)
                     else if index == self.ui_state.reader.current_index + 1 {
                         self.next_audio_buffer = Some((bytes, index));
@@ -586,9 +585,9 @@ impl eframe::App for MainApp {
                              self.ui_state.reader.is_playing = false;
                              self.ui_state.reader.current_index = 0;
                              self.next_audio_buffer = None;
-                         }
+                         } 
                          // Reset cờ downloading để vòng lặp biết đường xử lý
-                         self.is_downloading_next = false;
+                         self.is_downloading_next = false; 
                     }
                 },
                 ReaderSignal::Error => {
@@ -626,30 +625,39 @@ impl eframe::App for MainApp {
               else { self.load_texture(ctx, DEFAULT_ARROW, true); }
         }
 
+        // --- LAYOUT CHIA 2 CỘT ---
         egui::CentralPanel::default().show(ctx, |ui| {
             self.render_header(ui);
+            
+            ui.separator();
 
             egui::ScrollArea::vertical().show(ui, |ui| {
-                self.render_api_section(ui);
-                ui.add_space(5.0);
+                ui.columns(2, |columns| {
+                    // Cột trái
+                    columns[0].vertical(|ui| {
+                        self.render_api_section(ui);
+                        ui.add_space(10.0);
+                        
+                        self.render_prompt_section(ui);
+                        ui.add_space(10.0);
+                        
+                        self.render_settings_section(ui);
+                    });
 
-                self.render_prompt_section(ui);
-                ui.add_space(5.0);
-
-                self.render_hotkeys_section(ui);
-                ui.add_space(5.0);
-
-                self.render_aux_regions_section(ui);
-                ui.add_space(5.0);
-
-                self.render_settings_section(ui);
-                ui.add_space(20.0);
-
-                self.render_wwm_section(ctx, ui);
+                    // Cột phải
+                    columns[1].vertical(|ui| {
+                        self.render_hotkeys_section(ui);
+                        ui.add_space(10.0);
+                        
+                        self.render_aux_regions_section(ui);
+                        ui.add_space(10.0);
+                        
+                        self.render_wwm_section(ctx, ui);
+                    });
+                });
             });
         });
 
-        // Gọi hàm render cửa sổ reader mới
         self.render_reader_window(ctx);
 
         if self.ui_state.show_popup {
