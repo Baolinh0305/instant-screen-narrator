@@ -35,7 +35,7 @@ pub struct Config {
     pub current_prompt: String,
     
     #[serde(default)]
-    pub saved_prompts: Vec<CustomPrompt>, 
+    pub saved_prompts: Vec<CustomPrompt>,
     
     pub hotkey_translate: String,
     pub hotkey_select: String,
@@ -62,6 +62,10 @@ pub struct Config {
     pub auto_copy: bool,
     #[serde(default)]
     pub copy_instant_only: bool,
+
+    // --- THÊM DÒNG NÀY ---
+    #[serde(default)]
+    pub copy_original: bool,
 
     #[serde(default = "default_font_size")]
     pub overlay_font_size: i32,
@@ -102,6 +106,8 @@ impl Default for Config {
             arrow_check_interval: 0.02,
             auto_copy: false,
             copy_instant_only: false,
+            // --- THÊM DÒNG NÀY ---
+            copy_original: false,
             overlay_font_size: 24,
             is_dark_mode: false,
             freeze_screen: false,
@@ -127,6 +133,14 @@ impl Config {
 
     pub fn get_normal_prompt() -> String {
         "Perform OCR to extract all text visible in this image, regardless of the original language. Then, translate the extracted text directly into Vietnamese. Return only the Vietnamese translation, no introduction or notes.".to_string()
+    }
+
+    pub fn get_analyze_prompt() -> String {
+        "Analyze the content of this image and provide a brief description in Vietnamese. Strictly output the analysis only, keep it short and concise. Do not add any introductory text or extra notes.".to_string()
+    }
+
+    pub fn get_extract_text_prompt() -> String {
+        "Perform OCR to extract all text from this image exactly as it appears. Output ONLY the extracted text, regardless of the language. Do not add any notes or explanations.".to_string()
     }
 
     pub fn get_config_dir() -> PathBuf {
@@ -155,7 +169,7 @@ impl Config {
                     if config.arrow_check_interval > 0.2 { config.arrow_check_interval = 0.2; }
                     if config.overlay_font_size < 10 { config.overlay_font_size = 10; }
                     if config.overlay_font_size > 72 { config.overlay_font_size = 72; }
-                    config.split_tts = true; 
+                    config.split_tts = true;
                     config
                 },
                 Err(_) => Self::default(),
@@ -177,7 +191,7 @@ impl Config {
     
     pub fn get_current_groq_key(&self) -> String {
         if self.groq_api_keys.is_empty() { return String::new(); }
-        if self.active_groq_index < self.groq_api_keys.len() { self.groq_api_keys[self.active_groq_index].clone() } 
+        if self.active_groq_index < self.groq_api_keys.len() { self.groq_api_keys[self.active_groq_index].clone() }
         else { self.groq_api_keys[0].clone() }
     }
 }

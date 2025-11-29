@@ -328,6 +328,21 @@ impl UiRenderer for super::MainApp {
                     self.config_state.config.save().unwrap();
                 }
 
+                // --- THÊM 2 NÚT NÀY ---
+                if ui.button("🔍 Phân tích hình ảnh").clicked() {
+                    self.config_state.current_prompt = config::Config::get_analyze_prompt();
+                    self.config_state.config.current_prompt = self.config_state.current_prompt.clone();
+                    self.config_state.editing_prompt_index = None;
+                    self.config_state.config.save().unwrap();
+                }
+                if ui.button("abc Xuất chữ").clicked() {
+                    self.config_state.current_prompt = config::Config::get_extract_text_prompt();
+                    self.config_state.config.current_prompt = self.config_state.current_prompt.clone();
+                    self.config_state.editing_prompt_index = None;
+                    self.config_state.config.save().unwrap();
+                }
+                // ----------------------
+
                 let mut to_select = None;
                 for (i, _) in self.config_state.config.saved_prompts.iter().enumerate() {
                     let btn_label = format!("Mẫu {}", i + 1);
@@ -527,6 +542,12 @@ impl UiRenderer for super::MainApp {
                         self.config_state.config.save().unwrap();
                     }
                     if self.config_state.config.auto_copy {
+                        // --- RADIO BUTTON CHO COPY BẢN GỐC ---
+                        ui.horizontal(|ui| {
+                            ui.radio_value(&mut self.config_state.config.copy_original, false, "Copy bản dịch");
+                            ui.radio_value(&mut self.config_state.config.copy_original, true, "Copy bản gốc");
+                        });
+                        // -------------------------------------
                         if ui.add(egui::Checkbox::new(&mut self.config_state.config.copy_instant_only, "Chỉ áp dụng lên Dịch nhanh")).changed() {
                             self.config_state.config.save().unwrap();
                         }

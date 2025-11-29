@@ -242,8 +242,19 @@ impl MainApp {
         tx: Sender<(String, bool, f32, bool)>,
         should_copy: bool,
     ) {
-        let prompt = config.current_prompt.clone();
-        let mut final_text = String::new();
+        // 1. Chuẩn bị Prompt
+        let mut final_prompt = config.current_prompt.clone();
+        
+        // Nếu bật "Copy bản gốc", ta ép buộc LLM trả về format dạng: <Original> ||||| <Translation>
+        // Điều này cho phép ta lấy được text gốc để copy và text dịch để đọc chỉ trong 1 request.
+        let use_split_mode = should_copy && config.copy_original;
+        
+        if use_split_mode {
+            final_prompt = format!("{}\n\nSPECIAL INSTRUCTION: You must output the result in two parts. Part 1 is the raw original text extracted from the image. Part 2 is the result of the prompt above. Separate them with the delimiter '|||||'. Do not add any other text. Format: [Original Text] ||||| [Result Text]", final_prompt);
+        }
+
+        let mut final_text_to_show = String::new(); // Dùng để hiển thị/đọc
+        let mut final_text_to_copy = String::new(); // Dùng để copy (nếu split mode)
         
         overlay::set_font_size(config.overlay_font_size);
 
@@ -262,18 +273,34 @@ impl MainApp {
                     };
 
                     if api_key.is_empty() {
-                        final_text.push_str("(Chưa nhập Key) ");
+                        final_text_to_show.push_str("(Chưa nhập Key) ");
                         break;
                     }
 
-                    match translation::translate_from_image(&config.selected_api, &api_key, &prompt, &image_bytes).await {
+                    // Gọi API với prompt đã chỉnh sửa
+                    match translation::translate_from_image(&config.selected_api, &api_key, &final_prompt, &image_bytes).await {
                         Ok(result) => {
-                            final_text.push_str(&result.text);
+                            // Xử lý kết quả trả về
+                            if use_split_mode {
+                                let parts: Vec<&str> = result.text.split("|||||").collect();
+                                if parts.len() >= 2 {
+                                    final_text_to_copy.push_str(parts[0].trim());
+                                    final_text_to_show.push_str(parts[1].trim());
+                                } else {
+                                    // Fallback nếu LLM không tuân thủ format (hiếm khi xảy ra)
+                                    final_text_to_copy.push_str(&result.text);
+                                    final_text_to_show.push_str(&result.text);
+                                }
+                                final_text_to_copy.push(' ');
+                            } else {
+                                final_text_to_show.push_str(&result.text);
+                            }
+
                             if let Some(rem) = result.remaining_requests {
                                 GROQ_REMAINING.store(rem, Ordering::Relaxed);
                             }
                             success = true;
-                            break; 
+                            break;
                         },
                         Err(translation::TranslationError::RateLimitExceeded) => {
                             if config.selected_api == "groq" && config.groq_api_keys.len() > 1 {
@@ -281,34 +308,40 @@ impl MainApp {
                                 attempts += 1;
                                 continue;
                             } else {
-                                final_text.push_str("(Hết lượt Request & hết Key dự phòng) ");
+                                final_text_to_show.push_str("(Hết lượt Request & hết Key dự phòng) ");
                                 break;
                             }
                         },
                         Err(translation::TranslationError::Other(e)) => {
                             let error_msg = format!("Lỗi: {} ", e);
-                            final_text.push_str(&error_msg);
-                            break; 
+                            final_text_to_show.push_str(&error_msg);
+                            break;
                         }
                     }
                 }
-                if !success && final_text.is_empty() { final_text.push_str("... "); }
-                final_text.push(' ');
+                if !success && final_text_to_show.is_empty() { final_text_to_show.push_str("... "); }
+                final_text_to_show.push(' ');
             }
         }
 
-        let cleaned_text = final_text.trim().to_string();
-        if !cleaned_text.is_empty() {
+        let cleaned_show = final_text_to_show.trim().to_string();
+        let cleaned_copy = final_text_to_copy.trim().to_string();
+
+        if !cleaned_show.is_empty() {
             if should_copy {
-                Self::copy_to_clipboard(&cleaned_text);
+                if config.copy_original && !cleaned_copy.is_empty() {
+                    Self::copy_to_clipboard(&cleaned_copy);
+                } else {
+                    Self::copy_to_clipboard(&cleaned_show);
+                }
             }
 
-            let _ = tx.send((cleaned_text.clone(), config.split_tts, config.speed, config.use_tts));
+            let _ = tx.send((cleaned_show.clone(), config.split_tts, config.speed, config.use_tts));
             if config.show_overlay {
                 if let Some(region) = regions.first() {
                     let rect = RECT { left: region.x, top: region.y, right: region.x + region.width as i32, bottom: region.y + region.height as i32 };
-                    let duration_ms = (cleaned_text.chars().count() as f32 / 10.0 * 1000.0) as u32;
-                    std::thread::spawn(move || { show_result_window(rect, cleaned_text, duration_ms); });
+                    let duration_ms = (cleaned_show.chars().count() as f32 / 10.0 * 1000.0) as u32;
+                    std::thread::spawn(move || { show_result_window(rect, cleaned_show, duration_ms); });
                 }
             }
         }

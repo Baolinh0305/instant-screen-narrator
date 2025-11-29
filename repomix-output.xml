@@ -1470,9 +1470,9 @@ impl UiRenderer for super::MainApp {
 
         // Layout ngang, các phần tử sẽ nằm từ trái sang phải
         ui.horizontal(|ui| {
-            // 1. Checkbox Listening (Nằm bên trái)
+            // 1. Checkbox Listening (Đổi tên thành "Nghe phím")
             let mut listening = !self.is_paused;
-            if ui.checkbox(&mut listening, "✅ Listening").changed() {
+            if ui.checkbox(&mut listening, "✅ Nghe phím").changed() {
                 self.is_paused = !listening;
                 crate::LISTENING_PAUSED.store(self.is_paused, Ordering::Relaxed);
                 if self.is_paused {
@@ -1481,8 +1481,8 @@ impl UiRenderer for super::MainApp {
                 }
             }
 
-            // 2. Nút Ẩn vào Tray (Nhỏ gọn, nằm cạnh checkbox)
-            if ui.button("🔽 Tray").clicked() {
+            // 2. Nút Ẩn vào Tray (Đổi tên thành "Ẩn")
+            if ui.button("🔽 Ẩn").clicked() {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Visible(false));
             }
 
@@ -1503,7 +1503,8 @@ impl UiRenderer for super::MainApp {
                 self.ui_state.show_reset_confirm = true;
             }
 
-            if ui.button(egui::RichText::new("👤 Info").small()).clicked() {
+            // Đổi tên thành "by Baolinh0305"
+            if ui.button(egui::RichText::new("👤 by Baolinh0305").small()).clicked() {
                   let _ = webbrowser::open("https://github.com/Baolinh0305/instant-screen-narrator/releases");
             }
         });
@@ -1958,7 +1959,7 @@ impl UiRenderer for super::MainApp {
                         }
                     });
                 });
-                ui.add_space(5.0);
+                // Đã xóa ui.add_space(5.0) ở cuối để sát lề dưới
             }); // End CollapsingHeader
         }); // End vertical_centered
     }
@@ -2324,7 +2325,14 @@ impl MainApp {
 
         let mut style = (*ctx.style()).clone();
         style.spacing.item_spacing = egui::vec2(6.0, 6.0);
-        style.spacing.window_margin = egui::Margin::same(8.0);
+
+        // --- THAY ĐỔI Ở ĐÂY: Chỉnh margin dưới về 0 ---
+        style.spacing.window_margin = egui::Margin {
+            left: 8.0,
+            right: 8.0,
+            top: 8.0,
+            bottom: 0.0, // Để sát cạnh dưới
+        };
 
         style.visuals.widgets.noninteractive.rounding = egui::Rounding::same(4.0);
         style.visuals.widgets.inactive.rounding = egui::Rounding::same(4.0);
