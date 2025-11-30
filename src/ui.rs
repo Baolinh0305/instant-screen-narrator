@@ -34,13 +34,64 @@ use crate::WWM_REGION_PADDING;
 use crate::WWM_REGION_EXTRA_WIDTH;
 use crate::WWM_REGION_EXTRA_HEIGHT;
 use crate::APP_NAME;
-use winapi::um::winuser::GetSystemMetrics;
-use winapi::um::winuser::SM_CXSCREEN;
-use winapi::um::winuser::SM_CYSCREEN;
-use winapi::shared::windef::RECT;
+use winapi::um::winuser::{
+    GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN, FindWindowW, GetClientRect, ClientToScreen,
+    MessageBoxW, MB_OK, MB_ICONWARNING, MB_TOPMOST, IsWindowVisible
+};
+use winapi::shared::windef::{RECT, POINT};
+use std::ffi::OsStr;
+use std::os::windows::ffi::OsStrExt;
 use webbrowser;
 use std::fs;
 use rfd;
+
+// Helper: Chuyển chuỗi sang wide string
+fn to_wide(s: &str) -> Vec<u16> {
+    OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+}
+
+// Helper: Lấy tọa độ Client của cửa sổ Game
+fn get_game_bounds(window_title: &str) -> Option<(i32, i32, u32, u32)> {
+    unsafe {
+        let wide_title = to_wide(window_title);
+        // Tìm cửa sổ theo tên (Class để null)
+        let hwnd = FindWindowW(std::ptr::null(), wide_title.as_ptr());
+
+        if hwnd.is_null() || IsWindowVisible(hwnd) == 0 {
+            return None;
+        }
+
+        let mut rect: RECT = std::mem::zeroed();
+        // Lấy kích thước vùng nội dung (bỏ thanh tiêu đề)
+        if GetClientRect(hwnd, &mut rect) == 0 {
+            return None;
+        }
+
+        // Chuyển đổi điểm (0,0) của vùng nội dung sang tọa độ màn hình
+        let mut point = POINT { x: 0, y: 0 };
+        if ClientToScreen(hwnd, &mut point) == 0 {
+            return None;
+        }
+
+        let width = (rect.right - rect.left) as u32;
+        let height = (rect.bottom - rect.top) as u32;
+
+        Some((point.x, point.y, width, height))
+    }
+}
+
+// Helper: Hiện thông báo lỗi (Chạy thread riêng + TopMost để không bị che)
+fn show_alert(message: &str) {
+    let msg = message.to_string();
+    std::thread::spawn(move || {
+        unsafe {
+            let wide_msg = to_wide(&msg);
+            let wide_title = to_wide("Thông báo");
+            // MB_TOPMOST: Đảm bảo thông báo hiện lên trên cùng, đè lên cả game và tool
+            MessageBoxW(std::ptr::null_mut(), wide_msg.as_ptr(), wide_title.as_ptr(), MB_OK | MB_ICONWARNING | MB_TOPMOST);
+        }
+    });
+}
 
 #[derive(Clone)]
 pub struct ReaderState {
@@ -586,25 +637,29 @@ impl UiRenderer for super::MainApp {
                             else { self.wwm_state.wwm_success_timer = None; }
                         }
                         if ui.add(egui::Button::new(wwm_text)).clicked() {
-                            let screen_w = unsafe { GetSystemMetrics(SM_CXSCREEN) } as f32;
-                            let screen_h = unsafe { GetSystemMetrics(SM_CYSCREEN) } as f32;
+                            if let Some((win_x, win_y, win_w, win_h)) = get_game_bounds("Where Winds Meet") {
+                                let f_w = win_w as f32;
+                                let f_h = win_h as f32;
 
-                            let region = config::Region {
-                                x: (screen_w * WWM_TEXT_REGION_X_RATIO) as i32 - WWM_REGION_PADDING,
-                                y: (screen_h * WWM_TEXT_REGION_Y_RATIO) as i32 - WWM_REGION_PADDING,
-                                width: (screen_w * WWM_TEXT_REGION_W_RATIO) as u32 + WWM_REGION_EXTRA_WIDTH,
-                                height: (screen_h * WWM_TEXT_REGION_H_RATIO) as u32 + WWM_REGION_EXTRA_HEIGHT
-                            };
+                                let region = config::Region {
+                                    x: win_x + (f_w * WWM_TEXT_REGION_X_RATIO) as i32 - WWM_REGION_PADDING,
+                                    y: win_y + (f_h * WWM_TEXT_REGION_Y_RATIO) as i32 - WWM_REGION_PADDING,
+                                    width: (f_w * WWM_TEXT_REGION_W_RATIO) as u32 + WWM_REGION_EXTRA_WIDTH,
+                                    height: (f_h * WWM_TEXT_REGION_H_RATIO) as u32 + WWM_REGION_EXTRA_HEIGHT
+                                };
 
-                            self.config_state.config.fixed_regions.clear();
-                            self.config_state.config.fixed_regions.push(region.clone());
-                            self.config_state.current_prompt = config::Config::get_wuxia_prompt();
-                            self.config_state.config.current_prompt = self.config_state.current_prompt.clone();
-                            self.config_state.editing_prompt_index = None;
-                            self.config_state.config.save().unwrap();
-                            self.sync_config_from_file();
-                            self.wwm_state.wwm_success_timer = Some(std::time::Instant::now());
-                            overlay::show_highlight(RECT{left: region.x, top: region.y, right: region.x + region.width as i32, bottom: region.y + region.height as i32});
+                                self.config_state.config.fixed_regions.clear();
+                                self.config_state.config.fixed_regions.push(region.clone());
+                                self.config_state.current_prompt = config::Config::get_wuxia_prompt();
+                                self.config_state.config.current_prompt = self.config_state.current_prompt.clone();
+                                self.config_state.editing_prompt_index = None;
+                                self.config_state.config.save().unwrap();
+                                self.sync_config_from_file();
+                                self.wwm_state.wwm_success_timer = Some(std::time::Instant::now());
+                                overlay::show_highlight(RECT{left: region.x, top: region.y, right: region.x + region.width as i32, bottom: region.y + region.height as i32});
+                            } else {
+                                show_alert("Không tìm thấy cửa sổ 'Where Winds Meet'. Vui lòng mở game trước.");
+                            }
                         }
                         ui.label(egui::RichText::new("(16:9)").italics().color(egui::Color32::GRAY));
                     });
@@ -619,24 +674,29 @@ impl UiRenderer for super::MainApp {
                             else { self.wwm_state.wwm_name_success_timer = None; }
                         }
                         if ui.add(egui::Button::new(wwm_name_text)).clicked() {
-                            let screen_w = unsafe { GetSystemMetrics(SM_CXSCREEN) } as f32;
-                            let screen_h = unsafe { GetSystemMetrics(SM_CYSCREEN) } as f32;
-                            let region = config::Region {
-                                x: (screen_w * WWM_NAME_REGION_X_RATIO) as i32,
-                                y: (screen_h * WWM_NAME_REGION_Y_RATIO) as i32,
-                                width: (screen_w * WWM_NAME_REGION_W_RATIO) as u32,
-                                height: (screen_h * WWM_NAME_REGION_H_RATIO) as u32
-                            };
+                            if let Some((win_x, win_y, win_w, win_h)) = get_game_bounds("Where Winds Meet") {
+                                let f_w = win_w as f32;
+                                let f_h = win_h as f32;
+                                
+                                let region = config::Region {
+                                    x: win_x + (f_w * WWM_NAME_REGION_X_RATIO) as i32,
+                                    y: win_y + (f_h * WWM_NAME_REGION_Y_RATIO) as i32,
+                                    width: (f_w * WWM_NAME_REGION_W_RATIO) as u32,
+                                    height: (f_h * WWM_NAME_REGION_H_RATIO) as u32
+                                };
 
-                            self.config_state.config.fixed_regions.clear();
-                            self.config_state.config.fixed_regions.push(region.clone());
-                            self.config_state.current_prompt = config::Config::get_wuxia_speaker_prompt();
-                            self.config_state.config.current_prompt = self.config_state.current_prompt.clone();
-                            self.config_state.editing_prompt_index = None;
-                            self.config_state.config.save().unwrap();
-                            self.sync_config_from_file();
-                            self.wwm_state.wwm_name_success_timer = Some(std::time::Instant::now());
-                            overlay::show_highlight(RECT{left: region.x, top: region.y, right: region.x + region.width as i32, bottom: region.y + region.height as i32});
+                                self.config_state.config.fixed_regions.clear();
+                                self.config_state.config.fixed_regions.push(region.clone());
+                                self.config_state.current_prompt = config::Config::get_wuxia_speaker_prompt();
+                                self.config_state.config.current_prompt = self.config_state.current_prompt.clone();
+                                self.config_state.editing_prompt_index = None;
+                                self.config_state.config.save().unwrap();
+                                self.sync_config_from_file();
+                                self.wwm_state.wwm_name_success_timer = Some(std::time::Instant::now());
+                                overlay::show_highlight(RECT{left: region.x, top: region.y, right: region.x + region.width as i32, bottom: region.y + region.height as i32});
+                            } else {
+                                show_alert("Không tìm thấy cửa sổ 'Where Winds Meet'.");
+                            }
                         }
                         ui.label(egui::RichText::new("(16:9)").italics().color(egui::Color32::GRAY));
                     });
@@ -651,19 +711,24 @@ impl UiRenderer for super::MainApp {
                             else { self.wwm_state.arrow_wwm_success_timer = None; }
                         }
                         if ui.add(egui::Button::new(arrow_text)).clicked() {
-                            let screen_w = unsafe { GetSystemMetrics(SM_CXSCREEN) } as f32;
-                            let screen_h = unsafe { GetSystemMetrics(SM_CYSCREEN) } as f32;
-                            let region = config::Region {
-                                x: (screen_w * WWM_ARROW_REGION_X_RATIO) as i32,
-                                y: (screen_h * WWM_ARROW_REGION_Y_RATIO) as i32,
-                                width: (screen_w * WWM_ARROW_REGION_W_RATIO) as u32,
-                                height: (screen_h * WWM_ARROW_REGION_H_RATIO) as u32
-                            };
-                            self.config_state.config.arrow_region = Some(region.clone());
-                            self.config_state.config.save().unwrap();
-                            self.sync_config_from_file();
-                            self.wwm_state.arrow_wwm_success_timer = Some(std::time::Instant::now());
-                            overlay::show_highlight(RECT{left: region.x, top: region.y, right: region.x + region.width as i32, bottom: region.y + region.height as i32});
+                            if let Some((win_x, win_y, win_w, win_h)) = get_game_bounds("Where Winds Meet") {
+                                let f_w = win_w as f32;
+                                let f_h = win_h as f32;
+
+                                let region = config::Region {
+                                    x: win_x + (f_w * WWM_ARROW_REGION_X_RATIO) as i32,
+                                    y: win_y + (f_h * WWM_ARROW_REGION_Y_RATIO) as i32,
+                                    width: (f_w * WWM_ARROW_REGION_W_RATIO) as u32,
+                                    height: (f_h * WWM_ARROW_REGION_H_RATIO) as u32
+                                };
+                                self.config_state.config.arrow_region = Some(region.clone());
+                                self.config_state.config.save().unwrap();
+                                self.sync_config_from_file();
+                                self.wwm_state.arrow_wwm_success_timer = Some(std::time::Instant::now());
+                                overlay::show_highlight(RECT{left: region.x, top: region.y, right: region.x + region.width as i32, bottom: region.y + region.height as i32});
+                            } else {
+                                show_alert("Không tìm thấy cửa sổ 'Where Winds Meet'.");
+                            }
                         }
                         ui.label(egui::RichText::new("(16:9)").italics().color(egui::Color32::GRAY));
                         if ui.button("🖼️").clicked() { self.ui_state.show_arrow_window = true; }
