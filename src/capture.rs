@@ -1,11 +1,26 @@
 use image::{DynamicImage, ImageFormat};
 use screenshots::Screen;
 
+fn find_screen_containing(x: i32, y: i32, screens: &[Screen]) -> Option<&Screen> {
+    screens.iter().find(|s| {
+        let info = s.display_info;
+        x >= info.x
+        && x < info.x + info.width as i32
+        && y >= info.y
+        && y < info.y + info.height as i32
+    })
+}
+
 pub fn capture_image(region: &crate::config::Region) -> Result<Vec<u8>, anyhow::Error> {
     let screens = Screen::all()?;
     if screens.is_empty() { return Err(anyhow::anyhow!("No screens found")); }
-    let screen = &screens[0];
-    let image = screen.capture_area(region.x as i32, region.y as i32, region.width, region.height)?;
+    // Tìm màn hình chứa vùng chọn (ưu tiên góc trên-trái)
+    let screen = find_screen_containing(region.x, region.y, &screens)
+        .unwrap_or(&screens[0]);
+    // Chuyển đổi tọa độ toàn cục sang cục bộ màn hình
+    let relative_x = region.x - screen.display_info.x;
+    let relative_y = region.y - screen.display_info.y;
+    let image = screen.capture_area(relative_x, relative_y, region.width, region.height)?;
     let img = DynamicImage::ImageRgba8(image);
     let mut buffer = Vec::new();
     img.write_to(&mut std::io::Cursor::new(&mut buffer), ImageFormat::Png)?;
@@ -18,15 +33,18 @@ pub fn is_template_present(region: &crate::config::Region, template_bytes: &[u8]
         Err(_) => return false,
     };
     if screens.is_empty() { return false; }
-    let screen = &screens[0];
-
-    // 1. Capture screen
-    let captured_image = match screen.capture_area(region.x as i32, region.y as i32, region.width, region.height) {
+    // Tìm màn hình chứa vùng mũi tên
+    let screen = find_screen_containing(region.x, region.y, &screens)
+        .unwrap_or(&screens[0]);
+    // Tính tọa độ cục bộ
+    let relative_x = region.x - screen.display_info.x;
+    let relative_y = region.y - screen.display_info.y;
+    // Capture screen
+    let captured_image = match screen.capture_area(relative_x, relative_y, region.width, region.height) {
         Ok(img) => DynamicImage::ImageRgba8(img),
         Err(_) => return false,
     };
-
-    // 2. Load template
+    // Load template
     let template_image = match image::load_from_memory(template_bytes) {
         Ok(img) => img.to_rgba8(),
         Err(_) => return false,
@@ -39,8 +57,8 @@ pub fn is_template_present(region: &crate::config::Region, template_bytes: &[u8]
     if w_h < w_n || h_h < h_n { return false; }
 
     // === SENSITIVITY CONFIG ===
-    let color_tolerance = 60; 
-    let match_threshold = 0.85; 
+    let color_tolerance = 60;
+    let match_threshold = 0.85;
     // =========================
 
     let limit_x = w_h - w_n;
