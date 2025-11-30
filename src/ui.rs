@@ -690,6 +690,8 @@ impl UiRenderer for super::MainApp {
                         if ui.add(egui::Button::new(egui::RichText::new(btn_text).strong().color(egui::Color32::WHITE)).fill(btn_color).min_size(egui::vec2(200.0, 30.0))).clicked() {
                             self.wwm_state.auto_translate_active = !self.wwm_state.auto_translate_active;
                             AUTO_TRANSLATE_ENABLED.store(self.wwm_state.auto_translate_active, Ordering::Relaxed);
+                            // Gọi thông báo UX
+                            crate::show_toggle_notification(self.wwm_state.auto_translate_active);
                         }
                     });
                 });

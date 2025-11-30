@@ -520,8 +520,10 @@ impl MainApp {
                                 }
                             } else if id == 5 { // Toggle Auto
                                 let current_state = AUTO_TRANSLATE_ENABLED.load(Ordering::Relaxed);
-                                AUTO_TRANSLATE_ENABLED.store(!current_state, Ordering::Relaxed);
-                                // (Không cần làm gì thêm, hàm update() sẽ tự sync UI)
+                                let new_state = !current_state;
+                                AUTO_TRANSLATE_ENABLED.store(new_state, Ordering::Relaxed);
+                                // Gọi hàm thông báo
+                                show_toggle_notification(new_state);
                             }
                             // --- AUX REGIONS KEYS ---
                             else if id >= 100 && id < 200 { // Select Aux
@@ -893,4 +895,37 @@ fn main() -> Result<(), eframe::Error> {
             Box::new(MainApp::new(cc, tray_icon, rx))
         }),
     )
+}
+
+// --- THÊM HÀM NÀY VÀO CUỐI FILE ---
+pub fn show_toggle_notification(enabled: bool) {
+    let text = if enabled { "Đã bật tự động dịch" } else { "Đã tắt tự động dịch" };
+    
+    // 1. Phát âm thanh (TTS)
+    let text_audio = text.to_string();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let _ = crate::tts::speak(&text_audio, false, 1.2, true).await;
+        });
+    });
+
+    // 2. Hiện thông báo trên màn hình
+    let text_visual = text.to_string();
+    std::thread::spawn(move || {
+        unsafe {
+            let screen_w = winapi::um::winuser::GetSystemMetrics(winapi::um::winuser::SM_CXSCREEN);
+            let width = 400;
+            let height = 100;
+            let left = (screen_w / 2) - (width / 2);
+            let top = 100;
+            let rect = winapi::shared::windef::RECT {
+                left,
+                top,
+                right: left + width,
+                bottom: top + height
+            };
+            crate::overlay::show_result_window(rect, text_visual, 2000);
+        }
+    });
 }
