@@ -91,13 +91,7 @@ fn force_show_window_at_position() {
         if !hwnd.is_null() {
             ShowWindow(hwnd, SW_RESTORE);
             SetForegroundWindow(hwnd);
-
-            let screen_height = GetSystemMetrics(SM_CYSCREEN);
-            let mut rect: RECT = std::mem::zeroed();
-            if GetWindowRect(hwnd, &mut rect) != 0 {
-                let current_width = rect.right - rect.left;
-                SetWindowPos(hwnd, std::ptr::null_mut(), 0, 0, current_width, screen_height, 0x0040); 
-            }
+            // ĐÃ XÓA ĐOẠN SetWindowPos GÂY LỖI KÉO DÀI CỬA SỔ
         }
     }
 }
@@ -819,10 +813,10 @@ fn main() -> Result<(), eframe::Error> {
 
     // --- THAY ĐỔI Ở ĐÂY ---
     // Cũ: options.viewport.inner_size = Some(egui::vec2(900.0, 950.0));
-    options.viewport.inner_size = Some(egui::vec2(1245.0, 855.0));
+    options.viewport.inner_size = Some(egui::vec2(850.0, 790.0));
     // ---------------------
 
-    options.viewport.position = Some(egui::pos2(0.0, 0.0));
+    options.viewport.position = Some(egui::pos2(100.0, 100.0));
 
     let icon_bytes = include_bytes!("icon2.ico");
     if let Ok(icon_image) = image::load_from_memory(icon_bytes) {
