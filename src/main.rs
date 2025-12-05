@@ -55,21 +55,35 @@ const FONT_SIZE_MAX: u32 = 72;
 const PIXELS_PER_POINT: f32 = 1.2;
 
 // WWM Region Ratios (16:9)
-const WWM_TEXT_REGION_X_RATIO: f32 = 308.0 / 1920.0;
-const WWM_TEXT_REGION_Y_RATIO: f32 = 919.0 / 1080.0;
-const WWM_TEXT_REGION_W_RATIO: f32 = 1313.0 / 1920.0;
-const WWM_TEXT_REGION_H_RATIO: f32 = 135.0 / 1080.0;
-const WWM_NAME_REGION_X_RATIO: f32 = 310.0 / 1920.0;
+/* WWM Region Ratios (16:9) - Updated based on user coordinates
+Region 1: Normal Text (423, 925) -> (1496, 1037)
+W = 1496 - 423 = 1073
+H = 1037 - 925 = 112 */
+const WWM_TEXT_REGION_X_RATIO: f32 = 423.0 / 1920.0;
+const WWM_TEXT_REGION_Y_RATIO: f32 = 925.0 / 1080.0;
+const WWM_TEXT_REGION_W_RATIO: f32 = 1073.0 / 1920.0;
+const WWM_TEXT_REGION_H_RATIO: f32 = 112.0 / 1080.0;
+
+/* Region 2: With Name (423, 868) -> (1496, 1037)
+W = 1496 - 423 = 1073
+H = 1037 - 868 = 169 */
+const WWM_NAME_REGION_X_RATIO: f32 = 423.0 / 1920.0;
 const WWM_NAME_REGION_Y_RATIO: f32 = 868.0 / 1080.0;
-const WWM_NAME_REGION_W_RATIO: f32 = 1312.0 / 1920.0;
-const WWM_NAME_REGION_H_RATIO: f32 = 187.0 / 1080.0;
-const WWM_ARROW_REGION_X_RATIO: f32 = 930.0 / 1920.0;
-const WWM_ARROW_REGION_Y_RATIO: f32 = 1042.0 / 1080.0;
-const WWM_ARROW_REGION_W_RATIO: f32 = 49.0 / 1920.0;
-const WWM_ARROW_REGION_H_RATIO: f32 = 36.0 / 1080.0;
-const WWM_REGION_PADDING: i32 = 5;
-const WWM_REGION_EXTRA_WIDTH: u32 = 10;
-const WWM_REGION_EXTRA_HEIGHT: u32 = 10;
+const WWM_NAME_REGION_W_RATIO: f32 = 1073.0 / 1920.0;
+const WWM_NAME_REGION_H_RATIO: f32 = 169.0 / 1080.0;
+
+/* Region 3: Arrow (937, 1049) -> (979, 1079)
+W = 979 - 937 = 42
+H = 1079 - 1049 = 30 */
+const WWM_ARROW_REGION_X_RATIO: f32 = 937.0 / 1920.0;
+const WWM_ARROW_REGION_Y_RATIO: f32 = 1049.0 / 1080.0;
+const WWM_ARROW_REGION_W_RATIO: f32 = 42.0 / 1920.0;
+const WWM_ARROW_REGION_H_RATIO: f32 = 30.0 / 1080.0;
+
+// Padding (Giữ nguyên hoặc chỉnh về 0 nếu muốn chính xác tuyệt đối theo tọa độ bạn đưa)
+const WWM_REGION_PADDING: i32 = 0;
+const WWM_REGION_EXTRA_WIDTH: u32 = 0;
+const WWM_REGION_EXTRA_HEIGHT: u32 = 0;
 
 static LAST_SELECT: AtomicU64 = AtomicU64::new(0);
 static OVERLAY_ACTIVE: AtomicBool = AtomicBool::new(false);

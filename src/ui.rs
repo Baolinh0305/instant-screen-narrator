@@ -337,7 +337,7 @@ impl UiRenderer for super::MainApp {
                       let show_pass = self.ui_state.show_password;
 
                       if self.config_state.selected_api == "gemini" {
-                          if ui.add(egui::TextEdit::singleline(&mut self.config_state.gemini_api_key).password(!show_pass).desired_width(400.0)).changed() {
+                          if ui.add(egui::TextEdit::singleline(&mut self.config_state.gemini_api_key).password(!show_pass).desired_width(250.0)).changed() {
                               self.config_state.config.gemini_api_key = self.config_state.gemini_api_key.clone();
                               self.config_state.config.save().unwrap();
                           }
@@ -348,7 +348,7 @@ impl UiRenderer for super::MainApp {
                           }
 
                           if let Some(key) = self.config_state.config.groq_api_keys.get_mut(0) {
-                              if ui.add(egui::TextEdit::singleline(key).password(!show_pass).desired_width(400.0)).changed() {
+                              if ui.add(egui::TextEdit::singleline(key).password(!show_pass).desired_width(250.0)).changed() {
                                   self.config_state.config.save().unwrap();
                               }
                           }
@@ -552,30 +552,32 @@ impl UiRenderer for super::MainApp {
             egui::Grid::new("settings_grid").num_columns(2).spacing([20.0, 10.0]).show(ui, |ui| {
 
                 ui.label("Overlay:");
-                ui.horizontal(|ui| {
+                ui.vertical(|ui| {
                     if ui.add(egui::Checkbox::new(&mut self.config_state.config.show_overlay, "Hiện văn bản")).changed() {
                         self.config_state.config.save().unwrap();
                     }
-                    ui.add_space(10.0);
-                    ui.label("Cỡ chữ:");
-                    if ui.add_enabled(self.config_state.config.show_overlay, egui::Slider::new(&mut self.config_state.config.overlay_font_size, FONT_SIZE_MIN as i32..=FONT_SIZE_MAX as i32).text("px")).changed() {
-                        overlay::set_font_size(self.config_state.config.overlay_font_size);
-                        self.config_state.config.save().unwrap();
-                    }
+                    ui.horizontal(|ui| {
+                        ui.label("Cỡ chữ:");
+                        if ui.add_enabled(self.config_state.config.show_overlay, egui::Slider::new(&mut self.config_state.config.overlay_font_size, FONT_SIZE_MIN as i32..=FONT_SIZE_MAX as i32).text("px")).changed() {
+                            overlay::set_font_size(self.config_state.config.overlay_font_size);
+                            self.config_state.config.save().unwrap();
+                        }
+                    });
                 });
                 ui.end_row();
 
                 ui.label("TTS (Đọc):");
-                ui.horizontal(|ui| {
+                ui.vertical(|ui| {
                     if ui.add(egui::Checkbox::new(&mut self.config_state.use_tts, "Bật đọc")).changed() {
                         self.config_state.config.use_tts = self.config_state.use_tts;
                         self.config_state.config.save().unwrap();
                     }
-                    ui.add_space(10.0);
-                    ui.label("Tốc độ:");
-                    if ui.add_enabled(self.config_state.use_tts, egui::Slider::new(&mut self.config_state.config.speed, TTS_SPEED_MIN..=TTS_SPEED_MAX).text("x")).changed() {
-                        self.config_state.config.save().unwrap();
-                    }
+                    ui.horizontal(|ui| {
+                        ui.label("Tốc độ:");
+                        if ui.add_enabled(self.config_state.use_tts, egui::Slider::new(&mut self.config_state.config.speed, TTS_SPEED_MIN..=TTS_SPEED_MAX).text("x")).changed() {
+                            self.config_state.config.save().unwrap();
+                        }
+                    });
                 });
                 ui.end_row();
 

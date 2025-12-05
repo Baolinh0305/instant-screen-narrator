@@ -167,104 +167,6 @@ Tải file instant_screen_narrator.exe từ [releases](https://github.com/Baolin
 Dự án này sử dụng giấy phép MIT.
 </file>
 
-<file path="src/capture.rs">
-use image::{DynamicImage, ImageFormat};
-use screenshots::Screen;
-
-pub fn capture_image(region: &crate::config::Region) -> Result<Vec<u8>, anyhow::Error> {
-    let screens = Screen::all()?;
-    if screens.is_empty() { return Err(anyhow::anyhow!("No screens found")); }
-    let screen = &screens[0];
-    let image = screen.capture_area(region.x as i32, region.y as i32, region.width, region.height)?;
-    let img = DynamicImage::ImageRgba8(image);
-    let mut buffer = Vec::new();
-    img.write_to(&mut std::io::Cursor::new(&mut buffer), ImageFormat::Png)?;
-    Ok(buffer)
-}
-
-pub fn is_template_present(region: &crate::config::Region, template_bytes: &[u8]) -> bool {
-    let screens = match Screen::all() {
-        Ok(s) => s,
-        Err(_) => return false,
-    };
-    if screens.is_empty() { return false; }
-    let screen = &screens[0];
-
-    // 1. Capture screen
-    let captured_image = match screen.capture_area(region.x as i32, region.y as i32, region.width, region.height) {
-        Ok(img) => DynamicImage::ImageRgba8(img),
-        Err(_) => return false,
-    };
-
-    // 2. Load template
-    let template_image = match image::load_from_memory(template_bytes) {
-        Ok(img) => img.to_rgba8(),
-        Err(_) => return false,
-    };
-
-    let haystack = captured_image.to_rgba8();
-    let (w_h, h_h) = haystack.dimensions();
-    let (w_n, h_n) = template_image.dimensions();
-
-    if w_h < w_n || h_h < h_n { return false; }
-
-    // === SENSITIVITY CONFIG ===
-    let color_tolerance = 60; 
-    let match_threshold = 0.85; 
-    // =========================
-
-    let limit_x = w_h - w_n;
-    let limit_y = h_h - h_n;
-
-    for y in 0..=limit_y {
-        for x in 0..=limit_x {
-            if quick_check(&haystack, &template_image, x, y, w_n, h_n, color_tolerance) {
-                if fuzzy_match(&haystack, &template_image, x, y, color_tolerance, match_threshold) {
-                    return true;
-                }
-            }
-        }
-    }
-    
-    false
-}
-
-fn quick_check(haystack: &image::RgbaImage, needle: &image::RgbaImage, sx: u32, sy: u32, w: u32, h: u32, tol: i16) -> bool {
-    let cx = w / 2;
-    let cy = h / 2;
-    let p_n = needle.get_pixel(cx, cy);
-    if p_n[3] < 10 { return true; }
-    let p_h = haystack.get_pixel(sx + cx, sy + cy);
-    pixel_diff(p_h, p_n) <= tol
-}
-
-fn fuzzy_match(haystack: &image::RgbaImage, needle: &image::RgbaImage, sx: u32, sy: u32, tol: i16, threshold: f32) -> bool {
-    let (w, h) = needle.dimensions();
-    let mut total_checked = 0;
-    let mut matched_count = 0;
-
-    for y in (0..h).step_by(2) {
-        for x in (0..w).step_by(2) {
-            let p_n = needle.get_pixel(x, y);
-            if p_n[3] < 20 { continue; }
-            total_checked += 1;
-            let p_h = haystack.get_pixel(sx + x, sy + y);
-            if pixel_diff(p_h, p_n) <= tol { matched_count += 1; }
-        }
-    }
-
-    if total_checked == 0 { return true; }
-    (matched_count as f32 / total_checked as f32) >= threshold
-}
-
-fn pixel_diff(p1: &image::Rgba<u8>, p2: &image::Rgba<u8>) -> i16 {
-    let r = (p1[0] as i16 - p2[0] as i16).abs();
-    let g = (p1[1] as i16 - p2[1] as i16).abs();
-    let b = (p1[2] as i16 - p2[2] as i16).abs();
-    r.max(g).max(b)
-}
-</file>
-
 <file path="src/key_utils.rs">
 use winapi::um::winuser::*;
 
@@ -841,29 +743,19 @@ pub fn show_result_window(target_rect: RECT, text: String, duration_ms: u32) {
         if !hwnd.is_null() { { let mut list = OVERLAY_LIST.lock().unwrap(); list.push(hwnd as usize); } SetLayeredWindowAttributes(hwnd, 0x00FF00FF, 200, LWA_ALPHA | LWA_COLORKEY); SetTimer(hwnd, 1, duration_ms, None); let mut msg: MSG = std::mem::zeroed(); while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) != 0 { TranslateMessage(&msg); DispatchMessageW(&msg); if msg.message == WM_CLOSE { break; } } }
     }
 }
+
 unsafe extern "system" fn result_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
-        WM_PAINT => {
-            let mut ps: PAINTSTRUCT = std::mem::zeroed(); let hdc = BeginPaint(hwnd, &mut ps); let mut rect: RECT = std::mem::zeroed(); GetClientRect(hwnd, &mut rect);
-            let mem_dc = CreateCompatibleDC(hdc); let mem_bm = CreateCompatibleBitmap(hdc, rect.right, rect.bottom); SelectObject(mem_dc, mem_bm as *mut winapi::ctypes::c_void);
-            let k_br = CreateSolidBrush(0x00FF00FF); FillRect(mem_dc, &rect, k_br); DeleteObject(k_br as *mut winapi::ctypes::c_void);
-            let particles_opt = { let map_mutex = ANIMATION_MAP.get_or_init(|| Mutex::new(HashMap::new())); let map = map_mutex.lock().unwrap(); map.get(&(hwnd as usize)).cloned() };
-            if let Some(particles) = particles_opt { for p in particles { let p_rect = RECT { left: p.x as i32, top: p.y as i32, right: p.x as i32 + p.size, bottom: p.y as i32 + p.size }; let br = CreateSolidBrush(p.color); FillRect(mem_dc, &p_rect, br); DeleteObject(br as *mut winapi::ctypes::c_void); } } 
-            else {
-                let hrgn = CreateRoundRectRgn(0, 0, rect.right, rect.bottom, 8, 8); let bg_br = CreateSolidBrush(0x00000000); FillRgn(mem_dc, hrgn, bg_br); DeleteObject(bg_br as *mut winapi::ctypes::c_void);
-                { let map_mutex = HOVER_MAP.get_or_init(|| Mutex::new(HashMap::new())); let map = map_mutex.lock().unwrap(); if *map.get(&(hwnd as usize)).unwrap_or(&false) { let g_br = CreateSolidBrush(0x0000FF00); FrameRgn(mem_dc, hrgn, g_br, 2, 2); DeleteObject(g_br as *mut winapi::ctypes::c_void); } }
-                SetBkMode(mem_dc, 1); SetTextColor(mem_dc, 0x00FFFFFF); 
-                let font_size = CURRENT_FONT_SIZE.load(Ordering::Relaxed);
-                let hfont = CreateFontW(font_size, 0, 0, 0, 400, 0, 0, 0, 0, 0, 0, 2, 0, to_wide("Roboto").as_ptr()); 
-                let old_font = SelectObject(mem_dc, hfont as *mut winapi::ctypes::c_void);
-                let len = GetWindowTextLengthW(hwnd) + 1; let mut buf = vec![0u16; len as usize]; GetWindowTextW(hwnd, buf.as_mut_ptr(), len); let v_len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
-                let lines = break_text_into_lines(mem_dc, &buf[0..v_len], (rect.right - rect.left) - 20); let mut sz: SIZE = std::mem::zeroed(); GetTextExtentPoint32W(mem_dc, to_wide("A").as_ptr(), 1, &mut sz); let start_y = (rect.bottom - rect.top - (sz.cy * lines.len() as i32)) / 2;
-                for (i, line) in lines.iter().enumerate() { let y = start_y + (i as i32 * sz.cy); if i < lines.len() - 1 && line.spaces > 0 { SetTextJustification(mem_dc, ((rect.right - rect.left) - 20) - line.width, line.spaces as i32); TextOutW(mem_dc, 10, y, line.text.as_ptr(), line.text.len() as i32); SetTextJustification(mem_dc, 0, 0); } else { TextOutW(mem_dc, (rect.right - rect.left - line.width) / 2, y, line.text.as_ptr(), line.text.len() as i32); } }
-                SelectObject(mem_dc, old_font); DeleteObject(hfont as *mut winapi::ctypes::c_void); DeleteObject(hrgn as *mut winapi::ctypes::c_void);
-            }
-            BitBlt(hdc, 0, 0, rect.right, rect.bottom, mem_dc, 0, 0, SRCCOPY); DeleteObject(mem_bm as *mut winapi::ctypes::c_void); DeleteDC(mem_dc); EndPaint(hwnd, &mut ps); 0
+        WM_LBUTTONUP => {
+            // 1. Dừng đọc âm thanh ngay lập tức
+            crate::tts::stop();
+
+            // 2. Đóng cửa sổ Overlay ngay lập tức
+            PostMessageW(hwnd, WM_CLOSE, 0, 0);
+
+            // (Đã xóa phần hiệu ứng particle cũ vì nó làm chậm thao tác đóng)
+            0
         }
-        WM_LBUTTONUP => { let mut r = RECT{left:0,top:0,right:0,bottom:0}; GetClientRect(hwnd, &mut r); let mut p = Vec::new(); let mut s = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().subsec_nanos(); for _ in 0..150 { let c = if simple_rng(&mut s)%100 < 80 { 0 } else if simple_rng(&mut s)%100 < 90 { 0x0000FF00 } else { 0x00FFFFFF }; p.push(Particle{x: get_random_f32(&mut s,0.0,r.right as f32), y: get_random_f32(&mut s,0.0,r.bottom as f32), vx: get_random_f32(&mut s,-8.0,8.0), vy: get_random_f32(&mut s,-8.0,5.0), size: (simple_rng(&mut s)%5+2) as i32, color: c}); } { let map_mutex = ANIMATION_MAP.get_or_init(|| Mutex::new(HashMap::new())); map_mutex.lock().unwrap().insert(hwnd as usize, p); } KillTimer(hwnd, 1); SetTimer(hwnd, 3, 16, None); 0 }
         WM_TIMER => { if wparam == 1 { KillTimer(hwnd, 1); PostMessageW(hwnd, WM_CLOSE, 0, 0); } else if wparam == 3 { let mut close = false; { let map_mutex = ANIMATION_MAP.get_or_init(|| Mutex::new(HashMap::new())); let mut map = map_mutex.lock().unwrap(); if let Some(p) = map.get_mut(&(hwnd as usize)) { let mut cnt = 0; let mut r = RECT{left:0,top:0,right:0,bottom:0}; GetClientRect(hwnd, &mut r); for i in p.iter_mut() { i.x+=i.vx; i.y+=i.vy; i.vy+=0.5; if i.y < (r.bottom+100) as f32 { cnt+=1; } } if cnt == 0 { close = true; } } else { close = true; } } if close { KillTimer(hwnd, 3); PostMessageW(hwnd, WM_CLOSE, 0, 0); } else { InvalidateRect(hwnd, std::ptr::null(), 0); } } 0 }
         WM_DESTROY => { { let mut map = HOVER_MAP.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap(); map.remove(&(hwnd as usize)); } { let mut map = ANIMATION_MAP.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap(); map.remove(&(hwnd as usize)); } { let mut list = OVERLAY_LIST.lock().unwrap(); list.retain(|&h| h != hwnd as usize); } PostQuitMessage(0); 0 }
         WM_KEYDOWN => { if wparam == VK_ESCAPE as usize { PostMessageW(hwnd, WM_CLOSE, 0, 0); } 0 }
@@ -1000,9 +892,20 @@ use std::io::Cursor;
 use regex::Regex;
 use urlencoding;
 use futures::future::join_all;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+// Biến cờ để báo hiệu dừng đọc
+static STOP_SIGNAL: AtomicBool = AtomicBool::new(false);
+
+// Hàm gọi từ bên ngoài để dừng đọc
+pub fn stop() {
+    STOP_SIGNAL.store(true, Ordering::Relaxed);
+}
 
 pub async fn speak(text: &str, split: bool, speed: f32, use_tts: bool) -> Result<(), anyhow::Error> {
     if use_tts {
+        // Reset cờ dừng trước khi bắt đầu câu mới
+        STOP_SIGNAL.store(false, Ordering::Relaxed);
         speak_gtts(text, split, speed).await
     } else {
         Ok(())
@@ -1016,6 +919,8 @@ async fn speak_gtts(text: &str, split: bool, speed: f32) -> Result<(), anyhow::E
     } else {
         vec![text.to_string()]
     };
+
+    // Tải song song tất cả các đoạn audio
     let (_stream, stream_handle) = OutputStream::try_default()?;
     let handles: Vec<_> = parts.into_iter().filter(|p| !p.trim().is_empty()).map(|part| {
         tokio::spawn(async move {
@@ -1027,46 +932,280 @@ async fn speak_gtts(text: &str, split: bool, speed: f32) -> Result<(), anyhow::E
             response.bytes().await
         })
     }).collect();
+
     let results = join_all(handles).await;
+
     for result in results {
+        // Kiểm tra cờ dừng trước khi phát đoạn tiếp theo
+        if STOP_SIGNAL.load(Ordering::Relaxed) {
+            break;
+        }
+
         let bytes = result??;
         let sink = Sink::try_new(&stream_handle)?;
         let cursor = Cursor::new(bytes);
         let source = Decoder::new_mp3(cursor)?;
         let sped_source = source.speed(speed);
+        
         sink.append(sped_source);
-        sink.sleep_until_end();
+        
+        // Vòng lặp chờ audio chạy xong, nhưng có kiểm tra cờ dừng liên tục
+        while !sink.empty() {
+            if STOP_SIGNAL.load(Ordering::Relaxed) {
+                sink.stop(); // Dừng ngay lập tức
+                return Ok(());
+            }
+            // Ngủ ngắn để không chiếm CPU
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
     }
     Ok(())
 }
 
-// 1. Chỉ tải dữ liệu, không phát (Dùng để pre-fetch/cache)
+// 1. Chỉ tải dữ liệu
 pub async fn download_audio(text: String) -> Result<Vec<u8>, anyhow::Error> {
     if text.trim().is_empty() { return Ok(Vec::new()); }
-
     let url = format!(
         "https://translate.google.com/translate_tts?ie=UTF-8&q={}&tl=vi&client=tw-ob",
         urlencoding::encode(&text.trim())
     );
-
     let response = reqwest::get(&url).await?;
     let bytes = response.bytes().await?;
     Ok(bytes.to_vec())
 }
 
-// 2. Phát dữ liệu đã tải (Blocking)
+// 2. Phát dữ liệu (Blocking)
 pub fn play_audio_data(data: Vec<u8>, speed: f32) -> Result<(), anyhow::Error> {
     if data.is_empty() { return Ok(()); }
+    // Reset cờ trước khi phát
+    STOP_SIGNAL.store(false, Ordering::Relaxed);
 
-    // Rodio cần chạy trong thread blocking hoặc cần sleep_until_end
     let (_stream, stream_handle) = OutputStream::try_default()?;
     let sink = Sink::try_new(&stream_handle)?;
     let cursor = Cursor::new(data);
     let source = Decoder::new_mp3(cursor)?;
     let sped_source = source.speed(speed);
+    
     sink.append(sped_source);
-    sink.sleep_until_end();
+    
+    while !sink.empty() {
+        if STOP_SIGNAL.load(Ordering::Relaxed) {
+            sink.stop();
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
     Ok(())
+}
+</file>
+
+<file path="src/capture.rs">
+use image::{DynamicImage, ImageFormat, imageops::FilterType, RgbaImage};
+use screenshots::Screen;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU8, Ordering};
+
+// Biến toàn cục để lưu lại "kích thước mũi tên đúng nhất"
+// Giúp lần sau không phải dò lại từ đầu -> Tiết kiệm CPU
+static CACHED_TEMPLATE: Mutex<Option<RgbaImage>> = Mutex::new(None);
+
+// Bộ đếm để hạn chế tần suất quét kỹ (tránh nổ máy khi không có mũi tên)
+static SCAN_COUNTER: AtomicU8 = AtomicU8::new(0);
+
+/// Tìm màn hình chứa điểm (x, y)
+fn find_screen_containing(x: i32, y: i32, screens: &[Screen]) -> Option<&Screen> {
+    screens.iter().find(|s| {
+        let info = s.display_info;
+        x >= info.x 
+        && x < info.x + info.width as i32
+        && y >= info.y 
+        && y < info.y + info.height as i32
+    })
+}
+
+pub fn capture_image(region: &crate::config::Region) -> Result<Vec<u8>, anyhow::Error> {
+    let screens = Screen::all()?;
+    if screens.is_empty() { return Err(anyhow::anyhow!("No screens found")); }
+    
+    let screen = find_screen_containing(region.x, region.y, &screens)
+        .unwrap_or(&screens[0]);
+
+    let relative_x = region.x - screen.display_info.x;
+    let relative_y = region.y - screen.display_info.y;
+
+    let image = screen.capture_area(relative_x, relative_y, region.width, region.height)?;
+    let img = DynamicImage::ImageRgba8(image);
+    let mut buffer = Vec::new();
+    img.write_to(&mut std::io::Cursor::new(&mut buffer), ImageFormat::Png)?;
+    Ok(buffer)
+}
+
+pub fn is_template_present(region: &crate::config::Region, template_bytes: &[u8]) -> bool {
+    let screens = match Screen::all() {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    if screens.is_empty() { return false; }
+    
+    // 1. Chụp màn hình (đúng màn hình chứa vùng chọn)
+    let screen = find_screen_containing(region.x, region.y, &screens)
+        .unwrap_or(&screens[0]);
+
+    let relative_x = region.x - screen.display_info.x;
+    let relative_y = region.y - screen.display_info.y;
+
+    let captured_image = match screen.capture_area(relative_x, relative_y, region.width, region.height) {
+        Ok(img) => DynamicImage::ImageRgba8(img),
+        Err(_) => return false,
+    };
+
+    let haystack = captured_image.to_rgba8();
+
+    // 2. Load template gốc từ bytes
+    let template_original = match image::load_from_memory(template_bytes) {
+        Ok(img) => img.to_rgba8(),
+        Err(_) => return false,
+    };
+
+    // --- CHIẾN LƯỢC TIẾT KIỆM CPU ---
+
+    // BƯỚC 1: Kiểm tra Cache (Cái đã thành công lần trước)
+    // Nếu lần trước kích thước 1.2x đúng, giờ thử nó đầu tiên.
+    {
+        let cached = CACHED_TEMPLATE.lock().unwrap();
+        if let Some(ref cached_img) = *cached {
+            if check_match_at_scale(&haystack, cached_img) {
+                // Reset bộ đếm vì đã tìm thấy
+                SCAN_COUNTER.store(0, Ordering::Relaxed);
+                return true;
+            }
+        }
+    }
+
+    // BƯỚC 2: Kiểm tra kích thước gốc (1.0x)
+    // Nếu Cache sai (do game đổi size), thử lại bản gốc.
+    if check_match_at_scale(&haystack, &template_original) {
+        // Nếu bản gốc đúng, lưu vào Cache
+        let mut cached = CACHED_TEMPLATE.lock().unwrap();
+        *cached = Some(template_original);
+        SCAN_COUNTER.store(0, Ordering::Relaxed);
+        return true;
+    }
+
+    // BƯỚC 3: Quét kỹ (Multi-scale) - CHỈ CHẠY KHI CẦN THIẾT
+    // Chỉ chạy mỗi 10 frame (ví dụ: 0.2s một lần) để không nổ máy
+    let counter = SCAN_COUNTER.fetch_add(1, Ordering::Relaxed);
+    if counter % 10 != 0 {
+        return false; // Skip, đợi lượt sau
+    }
+
+    // Các tỷ lệ cần thử: 90%, 110%, 80%, 120%, 130%
+    // Mở rộng tỷ lệ quét từ 50% đến 150% để hỗ trợ màn hình độ phân giải thấp/cao
+    let scales = [
+        1.0,      // Thử kích thước gốc lần nữa cho chắc
+        0.9, 1.1,
+        0.8, 1.2,
+        0.75, 1.25,
+        0.7, 1.3,
+        0.6, 1.4, // Hỗ trợ khi màn hình nhỏ đi nhiều
+        0.5, 1.5  // Hỗ trợ khi màn hình cực nhỏ hoặc cực to
+    ];
+    
+    for scale in scales {
+        let (orig_w, orig_h) = template_original.dimensions();
+        let new_w = (orig_w as f32 * scale) as u32;
+        let new_h = (orig_h as f32 * scale) as u32;
+
+        if new_w < 5 || new_h < 5 { continue; }
+
+        let template_resized = image::imageops::resize(
+            &template_original, 
+            new_w, 
+            new_h, 
+            FilterType::Lanczos3
+        );
+
+        if check_match_at_scale(&haystack, &template_resized) {
+            // TÌM THẤY! Lưu ngay kích thước này vào Cache
+            let mut cached = CACHED_TEMPLATE.lock().unwrap();
+            *cached = Some(template_resized);
+            SCAN_COUNTER.store(0, Ordering::Relaxed);
+            return true;
+        }
+    }
+    
+    // Vẫn không thấy
+    false
+}
+
+// Hàm so khớp logic (Đã tối ưu)
+fn check_match_at_scale(haystack: &RgbaImage, needle: &RgbaImage) -> bool {
+    let (w_h, h_h) = haystack.dimensions();
+    let (w_n, h_n) = needle.dimensions();
+
+    if w_h < w_n || h_h < h_n { return false; }
+
+    // Tăng dung sai lên chút để dễ bắt hơn
+    // Tăng dung sai màu lên (vì khi scale ảnh bị mờ viền)
+    let color_tolerance = 90; // Cũ là 70
+    // Giảm ngưỡng chính xác xuống một chút
+    let match_threshold = 0.75; // Cũ là 0.80
+
+    let limit_x = w_h - w_n;
+    let limit_y = h_h - h_n;
+
+    // Tối ưu: Chỉ quét vùng trung tâm nếu có thể, nhưng để an toàn cứ quét hết
+    // Tăng bước nhảy (step) khi quét sơ bộ để nhanh hơn
+    for y in (0..=limit_y).step_by(2) {
+        for x in (0..=limit_x).step_by(2) {
+            if quick_check(haystack, needle, x, y, w_n, h_n, color_tolerance) {
+                if fuzzy_match(haystack, needle, x, y, color_tolerance, match_threshold) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn quick_check(haystack: &RgbaImage, needle: &RgbaImage, sx: u32, sy: u32, w: u32, h: u32, tol: i16) -> bool {
+    let cx = w / 2;
+    let cy = h / 2;
+    let p_n = needle.get_pixel(cx, cy);
+    if p_n[3] < 10 { return true; }
+    let p_h = haystack.get_pixel(sx + cx, sy + cy);
+    pixel_diff(p_h, p_n) <= tol
+}
+
+fn fuzzy_match(haystack: &RgbaImage, needle: &RgbaImage, sx: u32, sy: u32, tol: i16, threshold: f32) -> bool {
+    let (w, h) = needle.dimensions();
+    let mut total_checked = 0;
+    let mut matched_count = 0;
+
+    // Bước nhảy 2: Giảm 4 lần lượng tính toán
+    for y in (0..h).step_by(2) {
+        for x in (0..w).step_by(2) {
+            let p_n = needle.get_pixel(x, y);
+            if p_n[3] < 20 { continue; } // Bỏ qua pixel trong suốt
+            
+            total_checked += 1;
+            let p_h = haystack.get_pixel(sx + x, sy + y);
+            
+            if pixel_diff(p_h, p_n) <= tol { 
+                matched_count += 1; 
+            }
+        }
+    }
+
+    if total_checked == 0 { return true; }
+    (matched_count as f32 / total_checked as f32) >= threshold
+}
+
+fn pixel_diff(p1: &image::Rgba<u8>, p2: &image::Rgba<u8>) -> i16 {
+    let r = (p1[0] as i16 - p2[0] as i16).abs();
+    let g = (p1[1] as i16 - p2[1] as i16).abs();
+    let b = (p1[2] as i16 - p2[2] as i16).abs();
+    r.max(g).max(b)
 }
 </file>
 
@@ -1108,7 +1247,7 @@ pub struct Config {
     pub current_prompt: String,
     
     #[serde(default)]
-    pub saved_prompts: Vec<CustomPrompt>, 
+    pub saved_prompts: Vec<CustomPrompt>,
     
     pub hotkey_translate: String,
     pub hotkey_select: String,
@@ -1135,6 +1274,10 @@ pub struct Config {
     pub auto_copy: bool,
     #[serde(default)]
     pub copy_instant_only: bool,
+
+    // --- THÊM DÒNG NÀY ---
+    #[serde(default)]
+    pub copy_original: bool,
 
     #[serde(default = "default_font_size")]
     pub overlay_font_size: i32,
@@ -1175,6 +1318,8 @@ impl Default for Config {
             arrow_check_interval: 0.02,
             auto_copy: false,
             copy_instant_only: false,
+            // --- THÊM DÒNG NÀY ---
+            copy_original: false,
             overlay_font_size: 24,
             is_dark_mode: false,
             freeze_screen: false,
@@ -1200,6 +1345,14 @@ impl Config {
 
     pub fn get_normal_prompt() -> String {
         "Perform OCR to extract all text visible in this image, regardless of the original language. Then, translate the extracted text directly into Vietnamese. Return only the Vietnamese translation, no introduction or notes.".to_string()
+    }
+
+    pub fn get_analyze_prompt() -> String {
+        "Analyze the content of this image and provide a brief description in Vietnamese. Strictly output the analysis only, keep it short and concise. Do not add any introductory text or extra notes.".to_string()
+    }
+
+    pub fn get_extract_text_prompt() -> String {
+        "Perform OCR to extract all text from this image exactly as it appears. Output ONLY the extracted text, regardless of the language. Do not add any notes or explanations.".to_string()
     }
 
     pub fn get_config_dir() -> PathBuf {
@@ -1228,7 +1381,7 @@ impl Config {
                     if config.arrow_check_interval > 0.2 { config.arrow_check_interval = 0.2; }
                     if config.overlay_font_size < 10 { config.overlay_font_size = 10; }
                     if config.overlay_font_size > 72 { config.overlay_font_size = 72; }
-                    config.split_tts = true; 
+                    config.split_tts = true;
                     config
                 },
                 Err(_) => Self::default(),
@@ -1250,7 +1403,7 @@ impl Config {
     
     pub fn get_current_groq_key(&self) -> String {
         if self.groq_api_keys.is_empty() { return String::new(); }
-        if self.active_groq_index < self.groq_api_keys.len() { self.groq_api_keys[self.active_groq_index].clone() } 
+        if self.active_groq_index < self.groq_api_keys.len() { self.groq_api_keys[self.active_groq_index].clone() }
         else { self.groq_api_keys[0].clone() }
     }
 }
@@ -1293,13 +1446,64 @@ use crate::WWM_REGION_PADDING;
 use crate::WWM_REGION_EXTRA_WIDTH;
 use crate::WWM_REGION_EXTRA_HEIGHT;
 use crate::APP_NAME;
-use winapi::um::winuser::GetSystemMetrics;
-use winapi::um::winuser::SM_CXSCREEN;
-use winapi::um::winuser::SM_CYSCREEN;
-use winapi::shared::windef::RECT;
+use winapi::um::winuser::{
+    GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN, FindWindowW, GetClientRect, ClientToScreen,
+    MessageBoxW, MB_OK, MB_ICONWARNING, MB_TOPMOST, IsWindowVisible
+};
+use winapi::shared::windef::{RECT, POINT};
+use std::ffi::OsStr;
+use std::os::windows::ffi::OsStrExt;
 use webbrowser;
 use std::fs;
 use rfd;
+
+// Helper: Chuyển chuỗi sang wide string
+fn to_wide(s: &str) -> Vec<u16> {
+    OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+}
+
+// Helper: Lấy tọa độ Client của cửa sổ Game
+fn get_game_bounds(window_title: &str) -> Option<(i32, i32, u32, u32)> {
+    unsafe {
+        let wide_title = to_wide(window_title);
+        // Tìm cửa sổ theo tên (Class để null)
+        let hwnd = FindWindowW(std::ptr::null(), wide_title.as_ptr());
+
+        if hwnd.is_null() || IsWindowVisible(hwnd) == 0 {
+            return None;
+        }
+
+        let mut rect: RECT = std::mem::zeroed();
+        // Lấy kích thước vùng nội dung (bỏ thanh tiêu đề)
+        if GetClientRect(hwnd, &mut rect) == 0 {
+            return None;
+        }
+
+        // Chuyển đổi điểm (0,0) của vùng nội dung sang tọa độ màn hình
+        let mut point = POINT { x: 0, y: 0 };
+        if ClientToScreen(hwnd, &mut point) == 0 {
+            return None;
+        }
+
+        let width = (rect.right - rect.left) as u32;
+        let height = (rect.bottom - rect.top) as u32;
+
+        Some((point.x, point.y, width, height))
+    }
+}
+
+// Helper: Hiện thông báo lỗi (Chạy thread riêng + TopMost để không bị che)
+fn show_alert(message: &str) {
+    let msg = message.to_string();
+    std::thread::spawn(move || {
+        unsafe {
+            let wide_msg = to_wide(&msg);
+            let wide_title = to_wide("Thông báo");
+            // MB_TOPMOST: Đảm bảo thông báo hiện lên trên cùng, đè lên cả game và tool
+            MessageBoxW(std::ptr::null_mut(), wide_msg.as_ptr(), wide_title.as_ptr(), MB_OK | MB_ICONWARNING | MB_TOPMOST);
+        }
+    });
+}
 
 #[derive(Clone)]
 pub struct ReaderState {
@@ -1545,7 +1749,7 @@ impl UiRenderer for super::MainApp {
                       let show_pass = self.ui_state.show_password;
 
                       if self.config_state.selected_api == "gemini" {
-                          if ui.add(egui::TextEdit::singleline(&mut self.config_state.gemini_api_key).password(!show_pass).desired_width(400.0)).changed() {
+                          if ui.add(egui::TextEdit::singleline(&mut self.config_state.gemini_api_key).password(!show_pass).desired_width(250.0)).changed() {
                               self.config_state.config.gemini_api_key = self.config_state.gemini_api_key.clone();
                               self.config_state.config.save().unwrap();
                           }
@@ -1556,7 +1760,7 @@ impl UiRenderer for super::MainApp {
                           }
 
                           if let Some(key) = self.config_state.config.groq_api_keys.get_mut(0) {
-                              if ui.add(egui::TextEdit::singleline(key).password(!show_pass).desired_width(400.0)).changed() {
+                              if ui.add(egui::TextEdit::singleline(key).password(!show_pass).desired_width(250.0)).changed() {
                                   self.config_state.config.save().unwrap();
                               }
                           }
@@ -1586,6 +1790,21 @@ impl UiRenderer for super::MainApp {
                     self.config_state.editing_prompt_index = None;
                     self.config_state.config.save().unwrap();
                 }
+
+                // --- THÊM 2 NÚT NÀY ---
+                if ui.button("🔍 Phân tích hình ảnh").clicked() {
+                    self.config_state.current_prompt = config::Config::get_analyze_prompt();
+                    self.config_state.config.current_prompt = self.config_state.current_prompt.clone();
+                    self.config_state.editing_prompt_index = None;
+                    self.config_state.config.save().unwrap();
+                }
+                if ui.button("abc Xuất chữ").clicked() {
+                    self.config_state.current_prompt = config::Config::get_extract_text_prompt();
+                    self.config_state.config.current_prompt = self.config_state.current_prompt.clone();
+                    self.config_state.editing_prompt_index = None;
+                    self.config_state.config.save().unwrap();
+                }
+                // ----------------------
 
                 let mut to_select = None;
                 for (i, _) in self.config_state.config.saved_prompts.iter().enumerate() {
@@ -1745,30 +1964,32 @@ impl UiRenderer for super::MainApp {
             egui::Grid::new("settings_grid").num_columns(2).spacing([20.0, 10.0]).show(ui, |ui| {
 
                 ui.label("Overlay:");
-                ui.horizontal(|ui| {
+                ui.vertical(|ui| {
                     if ui.add(egui::Checkbox::new(&mut self.config_state.config.show_overlay, "Hiện văn bản")).changed() {
                         self.config_state.config.save().unwrap();
                     }
-                    ui.add_space(10.0);
-                    ui.label("Cỡ chữ:");
-                    if ui.add_enabled(self.config_state.config.show_overlay, egui::Slider::new(&mut self.config_state.config.overlay_font_size, FONT_SIZE_MIN as i32..=FONT_SIZE_MAX as i32).text("px")).changed() {
-                        overlay::set_font_size(self.config_state.config.overlay_font_size);
-                        self.config_state.config.save().unwrap();
-                    }
+                    ui.horizontal(|ui| {
+                        ui.label("Cỡ chữ:");
+                        if ui.add_enabled(self.config_state.config.show_overlay, egui::Slider::new(&mut self.config_state.config.overlay_font_size, FONT_SIZE_MIN as i32..=FONT_SIZE_MAX as i32).text("px")).changed() {
+                            overlay::set_font_size(self.config_state.config.overlay_font_size);
+                            self.config_state.config.save().unwrap();
+                        }
+                    });
                 });
                 ui.end_row();
 
                 ui.label("TTS (Đọc):");
-                ui.horizontal(|ui| {
+                ui.vertical(|ui| {
                     if ui.add(egui::Checkbox::new(&mut self.config_state.use_tts, "Bật đọc")).changed() {
                         self.config_state.config.use_tts = self.config_state.use_tts;
                         self.config_state.config.save().unwrap();
                     }
-                    ui.add_space(10.0);
-                    ui.label("Tốc độ:");
-                    if ui.add_enabled(self.config_state.use_tts, egui::Slider::new(&mut self.config_state.config.speed, TTS_SPEED_MIN..=TTS_SPEED_MAX).text("x")).changed() {
-                        self.config_state.config.save().unwrap();
-                    }
+                    ui.horizontal(|ui| {
+                        ui.label("Tốc độ:");
+                        if ui.add_enabled(self.config_state.use_tts, egui::Slider::new(&mut self.config_state.config.speed, TTS_SPEED_MIN..=TTS_SPEED_MAX).text("x")).changed() {
+                            self.config_state.config.save().unwrap();
+                        }
+                    });
                 });
                 ui.end_row();
 
@@ -1786,6 +2007,12 @@ impl UiRenderer for super::MainApp {
                         self.config_state.config.save().unwrap();
                     }
                     if self.config_state.config.auto_copy {
+                        // --- RADIO BUTTON CHO COPY BẢN GỐC ---
+                        ui.horizontal(|ui| {
+                            ui.radio_value(&mut self.config_state.config.copy_original, false, "Copy bản dịch");
+                            ui.radio_value(&mut self.config_state.config.copy_original, true, "Copy bản gốc");
+                        });
+                        // -------------------------------------
                         if ui.add(egui::Checkbox::new(&mut self.config_state.config.copy_instant_only, "Chỉ áp dụng lên Dịch nhanh")).changed() {
                             self.config_state.config.save().unwrap();
                         }
@@ -1824,25 +2051,29 @@ impl UiRenderer for super::MainApp {
                             else { self.wwm_state.wwm_success_timer = None; }
                         }
                         if ui.add(egui::Button::new(wwm_text)).clicked() {
-                            let screen_w = unsafe { GetSystemMetrics(SM_CXSCREEN) } as f32;
-                            let screen_h = unsafe { GetSystemMetrics(SM_CYSCREEN) } as f32;
+                            if let Some((win_x, win_y, win_w, win_h)) = get_game_bounds("Where Winds Meet") {
+                                let f_w = win_w as f32;
+                                let f_h = win_h as f32;
 
-                            let region = config::Region {
-                                x: (screen_w * WWM_TEXT_REGION_X_RATIO) as i32 - WWM_REGION_PADDING,
-                                y: (screen_h * WWM_TEXT_REGION_Y_RATIO) as i32 - WWM_REGION_PADDING,
-                                width: (screen_w * WWM_TEXT_REGION_W_RATIO) as u32 + WWM_REGION_EXTRA_WIDTH,
-                                height: (screen_h * WWM_TEXT_REGION_H_RATIO) as u32 + WWM_REGION_EXTRA_HEIGHT
-                            };
+                                let region = config::Region {
+                                    x: win_x + (f_w * WWM_TEXT_REGION_X_RATIO) as i32 - WWM_REGION_PADDING,
+                                    y: win_y + (f_h * WWM_TEXT_REGION_Y_RATIO) as i32 - WWM_REGION_PADDING,
+                                    width: (f_w * WWM_TEXT_REGION_W_RATIO) as u32 + WWM_REGION_EXTRA_WIDTH,
+                                    height: (f_h * WWM_TEXT_REGION_H_RATIO) as u32 + WWM_REGION_EXTRA_HEIGHT
+                                };
 
-                            self.config_state.config.fixed_regions.clear();
-                            self.config_state.config.fixed_regions.push(region.clone());
-                            self.config_state.current_prompt = config::Config::get_wuxia_prompt();
-                            self.config_state.config.current_prompt = self.config_state.current_prompt.clone();
-                            self.config_state.editing_prompt_index = None;
-                            self.config_state.config.save().unwrap();
-                            self.sync_config_from_file();
-                            self.wwm_state.wwm_success_timer = Some(std::time::Instant::now());
-                            overlay::show_highlight(RECT{left: region.x, top: region.y, right: region.x + region.width as i32, bottom: region.y + region.height as i32});
+                                self.config_state.config.fixed_regions.clear();
+                                self.config_state.config.fixed_regions.push(region.clone());
+                                self.config_state.current_prompt = config::Config::get_wuxia_prompt();
+                                self.config_state.config.current_prompt = self.config_state.current_prompt.clone();
+                                self.config_state.editing_prompt_index = None;
+                                self.config_state.config.save().unwrap();
+                                self.sync_config_from_file();
+                                self.wwm_state.wwm_success_timer = Some(std::time::Instant::now());
+                                overlay::show_highlight(RECT{left: region.x, top: region.y, right: region.x + region.width as i32, bottom: region.y + region.height as i32});
+                            } else {
+                                show_alert("Không tìm thấy cửa sổ 'Where Winds Meet'. Vui lòng mở game trước.");
+                            }
                         }
                         ui.label(egui::RichText::new("(16:9)").italics().color(egui::Color32::GRAY));
                     });
@@ -1857,24 +2088,29 @@ impl UiRenderer for super::MainApp {
                             else { self.wwm_state.wwm_name_success_timer = None; }
                         }
                         if ui.add(egui::Button::new(wwm_name_text)).clicked() {
-                            let screen_w = unsafe { GetSystemMetrics(SM_CXSCREEN) } as f32;
-                            let screen_h = unsafe { GetSystemMetrics(SM_CYSCREEN) } as f32;
-                            let region = config::Region {
-                                x: (screen_w * WWM_NAME_REGION_X_RATIO) as i32,
-                                y: (screen_h * WWM_NAME_REGION_Y_RATIO) as i32,
-                                width: (screen_w * WWM_NAME_REGION_W_RATIO) as u32,
-                                height: (screen_h * WWM_NAME_REGION_H_RATIO) as u32
-                            };
+                            if let Some((win_x, win_y, win_w, win_h)) = get_game_bounds("Where Winds Meet") {
+                                let f_w = win_w as f32;
+                                let f_h = win_h as f32;
+                                
+                                let region = config::Region {
+                                    x: win_x + (f_w * WWM_NAME_REGION_X_RATIO) as i32,
+                                    y: win_y + (f_h * WWM_NAME_REGION_Y_RATIO) as i32,
+                                    width: (f_w * WWM_NAME_REGION_W_RATIO) as u32,
+                                    height: (f_h * WWM_NAME_REGION_H_RATIO) as u32
+                                };
 
-                            self.config_state.config.fixed_regions.clear();
-                            self.config_state.config.fixed_regions.push(region.clone());
-                            self.config_state.current_prompt = config::Config::get_wuxia_speaker_prompt();
-                            self.config_state.config.current_prompt = self.config_state.current_prompt.clone();
-                            self.config_state.editing_prompt_index = None;
-                            self.config_state.config.save().unwrap();
-                            self.sync_config_from_file();
-                            self.wwm_state.wwm_name_success_timer = Some(std::time::Instant::now());
-                            overlay::show_highlight(RECT{left: region.x, top: region.y, right: region.x + region.width as i32, bottom: region.y + region.height as i32});
+                                self.config_state.config.fixed_regions.clear();
+                                self.config_state.config.fixed_regions.push(region.clone());
+                                self.config_state.current_prompt = config::Config::get_wuxia_speaker_prompt();
+                                self.config_state.config.current_prompt = self.config_state.current_prompt.clone();
+                                self.config_state.editing_prompt_index = None;
+                                self.config_state.config.save().unwrap();
+                                self.sync_config_from_file();
+                                self.wwm_state.wwm_name_success_timer = Some(std::time::Instant::now());
+                                overlay::show_highlight(RECT{left: region.x, top: region.y, right: region.x + region.width as i32, bottom: region.y + region.height as i32});
+                            } else {
+                                show_alert("Không tìm thấy cửa sổ 'Where Winds Meet'.");
+                            }
                         }
                         ui.label(egui::RichText::new("(16:9)").italics().color(egui::Color32::GRAY));
                     });
@@ -1889,19 +2125,24 @@ impl UiRenderer for super::MainApp {
                             else { self.wwm_state.arrow_wwm_success_timer = None; }
                         }
                         if ui.add(egui::Button::new(arrow_text)).clicked() {
-                            let screen_w = unsafe { GetSystemMetrics(SM_CXSCREEN) } as f32;
-                            let screen_h = unsafe { GetSystemMetrics(SM_CYSCREEN) } as f32;
-                            let region = config::Region {
-                                x: (screen_w * WWM_ARROW_REGION_X_RATIO) as i32,
-                                y: (screen_h * WWM_ARROW_REGION_Y_RATIO) as i32,
-                                width: (screen_w * WWM_ARROW_REGION_W_RATIO) as u32,
-                                height: (screen_h * WWM_ARROW_REGION_H_RATIO) as u32
-                            };
-                            self.config_state.config.arrow_region = Some(region.clone());
-                            self.config_state.config.save().unwrap();
-                            self.sync_config_from_file();
-                            self.wwm_state.arrow_wwm_success_timer = Some(std::time::Instant::now());
-                            overlay::show_highlight(RECT{left: region.x, top: region.y, right: region.x + region.width as i32, bottom: region.y + region.height as i32});
+                            if let Some((win_x, win_y, win_w, win_h)) = get_game_bounds("Where Winds Meet") {
+                                let f_w = win_w as f32;
+                                let f_h = win_h as f32;
+
+                                let region = config::Region {
+                                    x: win_x + (f_w * WWM_ARROW_REGION_X_RATIO) as i32,
+                                    y: win_y + (f_h * WWM_ARROW_REGION_Y_RATIO) as i32,
+                                    width: (f_w * WWM_ARROW_REGION_W_RATIO) as u32,
+                                    height: (f_h * WWM_ARROW_REGION_H_RATIO) as u32
+                                };
+                                self.config_state.config.arrow_region = Some(region.clone());
+                                self.config_state.config.save().unwrap();
+                                self.sync_config_from_file();
+                                self.wwm_state.arrow_wwm_success_timer = Some(std::time::Instant::now());
+                                overlay::show_highlight(RECT{left: region.x, top: region.y, right: region.x + region.width as i32, bottom: region.y + region.height as i32});
+                            } else {
+                                show_alert("Không tìm thấy cửa sổ 'Where Winds Meet'.");
+                            }
                         }
                         ui.label(egui::RichText::new("(16:9)").italics().color(egui::Color32::GRAY));
                         if ui.button("🖼️").clicked() { self.ui_state.show_arrow_window = true; }
@@ -1928,6 +2169,8 @@ impl UiRenderer for super::MainApp {
                         if ui.add(egui::Button::new(egui::RichText::new(btn_text).strong().color(egui::Color32::WHITE)).fill(btn_color).min_size(egui::vec2(200.0, 30.0))).clicked() {
                             self.wwm_state.auto_translate_active = !self.wwm_state.auto_translate_active;
                             AUTO_TRANSLATE_ENABLED.store(self.wwm_state.auto_translate_active, Ordering::Relaxed);
+                            // Gọi thông báo UX
+                            crate::show_toggle_notification(self.wwm_state.auto_translate_active);
                         }
                     });
                 });
@@ -2171,21 +2414,35 @@ const FONT_SIZE_MAX: u32 = 72;
 const PIXELS_PER_POINT: f32 = 1.2;
 
 // WWM Region Ratios (16:9)
-const WWM_TEXT_REGION_X_RATIO: f32 = 308.0 / 1920.0;
-const WWM_TEXT_REGION_Y_RATIO: f32 = 919.0 / 1080.0;
-const WWM_TEXT_REGION_W_RATIO: f32 = 1313.0 / 1920.0;
-const WWM_TEXT_REGION_H_RATIO: f32 = 135.0 / 1080.0;
-const WWM_NAME_REGION_X_RATIO: f32 = 310.0 / 1920.0;
+/* WWM Region Ratios (16:9) - Updated based on user coordinates
+Region 1: Normal Text (423, 925) -> (1496, 1037)
+W = 1496 - 423 = 1073
+H = 1037 - 925 = 112 */
+const WWM_TEXT_REGION_X_RATIO: f32 = 423.0 / 1920.0;
+const WWM_TEXT_REGION_Y_RATIO: f32 = 925.0 / 1080.0;
+const WWM_TEXT_REGION_W_RATIO: f32 = 1073.0 / 1920.0;
+const WWM_TEXT_REGION_H_RATIO: f32 = 112.0 / 1080.0;
+
+/* Region 2: With Name (423, 868) -> (1496, 1037)
+W = 1496 - 423 = 1073
+H = 1037 - 868 = 169 */
+const WWM_NAME_REGION_X_RATIO: f32 = 423.0 / 1920.0;
 const WWM_NAME_REGION_Y_RATIO: f32 = 868.0 / 1080.0;
-const WWM_NAME_REGION_W_RATIO: f32 = 1312.0 / 1920.0;
-const WWM_NAME_REGION_H_RATIO: f32 = 187.0 / 1080.0;
-const WWM_ARROW_REGION_X_RATIO: f32 = 930.0 / 1920.0;
-const WWM_ARROW_REGION_Y_RATIO: f32 = 1042.0 / 1080.0;
-const WWM_ARROW_REGION_W_RATIO: f32 = 49.0 / 1920.0;
-const WWM_ARROW_REGION_H_RATIO: f32 = 36.0 / 1080.0;
-const WWM_REGION_PADDING: i32 = 5;
-const WWM_REGION_EXTRA_WIDTH: u32 = 10;
-const WWM_REGION_EXTRA_HEIGHT: u32 = 10;
+const WWM_NAME_REGION_W_RATIO: f32 = 1073.0 / 1920.0;
+const WWM_NAME_REGION_H_RATIO: f32 = 169.0 / 1080.0;
+
+/* Region 3: Arrow (937, 1049) -> (979, 1079)
+W = 979 - 937 = 42
+H = 1079 - 1049 = 30 */
+const WWM_ARROW_REGION_X_RATIO: f32 = 937.0 / 1920.0;
+const WWM_ARROW_REGION_Y_RATIO: f32 = 1049.0 / 1080.0;
+const WWM_ARROW_REGION_W_RATIO: f32 = 42.0 / 1920.0;
+const WWM_ARROW_REGION_H_RATIO: f32 = 30.0 / 1080.0;
+
+// Padding (Giữ nguyên hoặc chỉnh về 0 nếu muốn chính xác tuyệt đối theo tọa độ bạn đưa)
+const WWM_REGION_PADDING: i32 = 0;
+const WWM_REGION_EXTRA_WIDTH: u32 = 0;
+const WWM_REGION_EXTRA_HEIGHT: u32 = 0;
 
 static LAST_SELECT: AtomicU64 = AtomicU64::new(0);
 static OVERLAY_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -2207,13 +2464,7 @@ fn force_show_window_at_position() {
         if !hwnd.is_null() {
             ShowWindow(hwnd, SW_RESTORE);
             SetForegroundWindow(hwnd);
-
-            let screen_height = GetSystemMetrics(SM_CYSCREEN);
-            let mut rect: RECT = std::mem::zeroed();
-            if GetWindowRect(hwnd, &mut rect) != 0 {
-                let current_width = rect.right - rect.left;
-                SetWindowPos(hwnd, std::ptr::null_mut(), 0, 0, current_width, screen_height, 0x0040); 
-            }
+            // ĐÃ XÓA ĐOẠN SetWindowPos GÂY LỖI KÉO DÀI CỬA SỔ
         }
     }
 }
@@ -2358,8 +2609,19 @@ impl MainApp {
         tx: Sender<(String, bool, f32, bool)>,
         should_copy: bool,
     ) {
-        let prompt = config.current_prompt.clone();
-        let mut final_text = String::new();
+        // 1. Chuẩn bị Prompt
+        let mut final_prompt = config.current_prompt.clone();
+        
+        // Nếu bật "Copy bản gốc", ta ép buộc LLM trả về format dạng: <Original> ||||| <Translation>
+        // Điều này cho phép ta lấy được text gốc để copy và text dịch để đọc chỉ trong 1 request.
+        let use_split_mode = should_copy && config.copy_original;
+        
+        if use_split_mode {
+            final_prompt = format!("{}\n\nSPECIAL INSTRUCTION: You must output the result in two parts. Part 1 is the raw original text extracted from the image. Part 2 is the result of the prompt above. Separate them with the delimiter '|||||'. Do not add any other text. Format: [Original Text] ||||| [Result Text]", final_prompt);
+        }
+
+        let mut final_text_to_show = String::new(); // Dùng để hiển thị/đọc
+        let mut final_text_to_copy = String::new(); // Dùng để copy (nếu split mode)
         
         overlay::set_font_size(config.overlay_font_size);
 
@@ -2378,18 +2640,34 @@ impl MainApp {
                     };
 
                     if api_key.is_empty() {
-                        final_text.push_str("(Chưa nhập Key) ");
+                        final_text_to_show.push_str("(Chưa nhập Key) ");
                         break;
                     }
 
-                    match translation::translate_from_image(&config.selected_api, &api_key, &prompt, &image_bytes).await {
+                    // Gọi API với prompt đã chỉnh sửa
+                    match translation::translate_from_image(&config.selected_api, &api_key, &final_prompt, &image_bytes).await {
                         Ok(result) => {
-                            final_text.push_str(&result.text);
+                            // Xử lý kết quả trả về
+                            if use_split_mode {
+                                let parts: Vec<&str> = result.text.split("|||||").collect();
+                                if parts.len() >= 2 {
+                                    final_text_to_copy.push_str(parts[0].trim());
+                                    final_text_to_show.push_str(parts[1].trim());
+                                } else {
+                                    // Fallback nếu LLM không tuân thủ format (hiếm khi xảy ra)
+                                    final_text_to_copy.push_str(&result.text);
+                                    final_text_to_show.push_str(&result.text);
+                                }
+                                final_text_to_copy.push(' ');
+                            } else {
+                                final_text_to_show.push_str(&result.text);
+                            }
+
                             if let Some(rem) = result.remaining_requests {
                                 GROQ_REMAINING.store(rem, Ordering::Relaxed);
                             }
                             success = true;
-                            break; 
+                            break;
                         },
                         Err(translation::TranslationError::RateLimitExceeded) => {
                             if config.selected_api == "groq" && config.groq_api_keys.len() > 1 {
@@ -2397,34 +2675,40 @@ impl MainApp {
                                 attempts += 1;
                                 continue;
                             } else {
-                                final_text.push_str("(Hết lượt Request & hết Key dự phòng) ");
+                                final_text_to_show.push_str("(Hết lượt Request & hết Key dự phòng) ");
                                 break;
                             }
                         },
                         Err(translation::TranslationError::Other(e)) => {
                             let error_msg = format!("Lỗi: {} ", e);
-                            final_text.push_str(&error_msg);
-                            break; 
+                            final_text_to_show.push_str(&error_msg);
+                            break;
                         }
                     }
                 }
-                if !success && final_text.is_empty() { final_text.push_str("... "); }
-                final_text.push(' ');
+                if !success && final_text_to_show.is_empty() { final_text_to_show.push_str("... "); }
+                final_text_to_show.push(' ');
             }
         }
 
-        let cleaned_text = final_text.trim().to_string();
-        if !cleaned_text.is_empty() {
+        let cleaned_show = final_text_to_show.trim().to_string();
+        let cleaned_copy = final_text_to_copy.trim().to_string();
+
+        if !cleaned_show.is_empty() {
             if should_copy {
-                Self::copy_to_clipboard(&cleaned_text);
+                if config.copy_original && !cleaned_copy.is_empty() {
+                    Self::copy_to_clipboard(&cleaned_copy);
+                } else {
+                    Self::copy_to_clipboard(&cleaned_show);
+                }
             }
 
-            let _ = tx.send((cleaned_text.clone(), config.split_tts, config.speed, config.use_tts));
+            let _ = tx.send((cleaned_show.clone(), config.split_tts, config.speed, config.use_tts));
             if config.show_overlay {
                 if let Some(region) = regions.first() {
                     let rect = RECT { left: region.x, top: region.y, right: region.x + region.width as i32, bottom: region.y + region.height as i32 };
-                    let duration_ms = (cleaned_text.chars().count() as f32 / 10.0 * 1000.0) as u32;
-                    std::thread::spawn(move || { show_result_window(rect, cleaned_text, duration_ms); });
+                    let duration_ms = (cleaned_show.chars().count() as f32 / 10.0 * 1000.0) as u32;
+                    std::thread::spawn(move || { show_result_window(rect, cleaned_show, duration_ms); });
                 }
             }
         }
@@ -2603,8 +2887,10 @@ impl MainApp {
                                 }
                             } else if id == 5 { // Toggle Auto
                                 let current_state = AUTO_TRANSLATE_ENABLED.load(Ordering::Relaxed);
-                                AUTO_TRANSLATE_ENABLED.store(!current_state, Ordering::Relaxed);
-                                // (Không cần làm gì thêm, hàm update() sẽ tự sync UI)
+                                let new_state = !current_state;
+                                AUTO_TRANSLATE_ENABLED.store(new_state, Ordering::Relaxed);
+                                // Gọi hàm thông báo
+                                show_toggle_notification(new_state);
                             }
                             // --- AUX REGIONS KEYS ---
                             else if id >= 100 && id < 200 { // Select Aux
@@ -2900,10 +3186,10 @@ fn main() -> Result<(), eframe::Error> {
 
     // --- THAY ĐỔI Ở ĐÂY ---
     // Cũ: options.viewport.inner_size = Some(egui::vec2(900.0, 950.0));
-    options.viewport.inner_size = Some(egui::vec2(1245.0, 855.0));
+    options.viewport.inner_size = Some(egui::vec2(850.0, 790.0));
     // ---------------------
 
-    options.viewport.position = Some(egui::pos2(0.0, 0.0));
+    options.viewport.position = Some(egui::pos2(100.0, 100.0));
 
     let icon_bytes = include_bytes!("icon2.ico");
     if let Ok(icon_image) = image::load_from_memory(icon_bytes) {
@@ -2976,6 +3262,39 @@ fn main() -> Result<(), eframe::Error> {
             Box::new(MainApp::new(cc, tray_icon, rx))
         }),
     )
+}
+
+// --- THÊM HÀM NÀY VÀO CUỐI FILE ---
+pub fn show_toggle_notification(enabled: bool) {
+    let text = if enabled { "Đã bật tự động dịch" } else { "Đã tắt tự động dịch" };
+    
+    // 1. Phát âm thanh (TTS)
+    let text_audio = text.to_string();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let _ = crate::tts::speak(&text_audio, false, 1.2, true).await;
+        });
+    });
+
+    // 2. Hiện thông báo trên màn hình
+    let text_visual = text.to_string();
+    std::thread::spawn(move || {
+        unsafe {
+            let screen_w = winapi::um::winuser::GetSystemMetrics(winapi::um::winuser::SM_CXSCREEN);
+            let width = 400;
+            let height = 100;
+            let left = (screen_w / 2) - (width / 2);
+            let top = 100;
+            let rect = winapi::shared::windef::RECT {
+                left,
+                top,
+                right: left + width,
+                bottom: top + height
+            };
+            crate::overlay::show_result_window(rect, text_visual, 2000);
+        }
+    });
 }
 </file>
 

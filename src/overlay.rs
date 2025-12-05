@@ -523,35 +523,209 @@ pub fn show_result_window(target_rect: RECT, text: String, duration_ms: u32) {
         if !hwnd.is_null() { { let mut list = OVERLAY_LIST.lock().unwrap(); list.push(hwnd as usize); } SetLayeredWindowAttributes(hwnd, 0x00FF00FF, 200, LWA_ALPHA | LWA_COLORKEY); SetTimer(hwnd, 1, duration_ms, None); let mut msg: MSG = std::mem::zeroed(); while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) != 0 { TranslateMessage(&msg); DispatchMessageW(&msg); if msg.message == WM_CLOSE { break; } } }
     }
 }
+
 unsafe extern "system" fn result_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WM_PAINT => {
-            let mut ps: PAINTSTRUCT = std::mem::zeroed(); let hdc = BeginPaint(hwnd, &mut ps); let mut rect: RECT = std::mem::zeroed(); GetClientRect(hwnd, &mut rect);
-            let mem_dc = CreateCompatibleDC(hdc); let mem_bm = CreateCompatibleBitmap(hdc, rect.right, rect.bottom); SelectObject(mem_dc, mem_bm as *mut winapi::ctypes::c_void);
-            let k_br = CreateSolidBrush(0x00FF00FF); FillRect(mem_dc, &rect, k_br); DeleteObject(k_br as *mut winapi::ctypes::c_void);
-            let particles_opt = { let map_mutex = ANIMATION_MAP.get_or_init(|| Mutex::new(HashMap::new())); let map = map_mutex.lock().unwrap(); map.get(&(hwnd as usize)).cloned() };
-            if let Some(particles) = particles_opt { for p in particles { let p_rect = RECT { left: p.x as i32, top: p.y as i32, right: p.x as i32 + p.size, bottom: p.y as i32 + p.size }; let br = CreateSolidBrush(p.color); FillRect(mem_dc, &p_rect, br); DeleteObject(br as *mut winapi::ctypes::c_void); } } 
-            else {
-                let hrgn = CreateRoundRectRgn(0, 0, rect.right, rect.bottom, 8, 8); let bg_br = CreateSolidBrush(0x00000000); FillRgn(mem_dc, hrgn, bg_br); DeleteObject(bg_br as *mut winapi::ctypes::c_void);
-                { let map_mutex = HOVER_MAP.get_or_init(|| Mutex::new(HashMap::new())); let map = map_mutex.lock().unwrap(); if *map.get(&(hwnd as usize)).unwrap_or(&false) { let g_br = CreateSolidBrush(0x0000FF00); FrameRgn(mem_dc, hrgn, g_br, 2, 2); DeleteObject(g_br as *mut winapi::ctypes::c_void); } }
-                SetBkMode(mem_dc, 1); SetTextColor(mem_dc, 0x00FFFFFF); 
+            let mut ps: PAINTSTRUCT = std::mem::zeroed();
+            let hdc = BeginPaint(hwnd, &mut ps);
+            let mut rect: RECT = std::mem::zeroed();
+            GetClientRect(hwnd, &mut rect);
+
+            // Double buffering để tránh giật hình
+            let mem_dc = CreateCompatibleDC(hdc);
+            let mem_bm = CreateCompatibleBitmap(hdc, rect.right, rect.bottom);
+            SelectObject(mem_dc, mem_bm as *mut winapi::ctypes::c_void);
+
+            // Xóa nền (Fill background)
+            let k_br = CreateSolidBrush(0x00FF00FF); // Màu key (sẽ trong suốt)
+            FillRect(mem_dc, &rect, k_br);
+            DeleteObject(k_br as *mut winapi::ctypes::c_void);
+
+            // Kiểm tra xem có hiệu ứng hạt không (dù đã tắt tạo hạt, vẫn giữ logic vẽ để tránh lỗi)
+            let particles_opt = {
+                let map_mutex = ANIMATION_MAP.get_or_init(|| Mutex::new(HashMap::new()));
+                let map = map_mutex.lock().unwrap();
+                map.get(&(hwnd as usize)).cloned()
+            };
+
+            if let Some(particles) = particles_opt {
+                for p in particles {
+                    let p_rect = RECT {
+                        left: p.x as i32,
+                        top: p.y as i32,
+                        right: p.x as i32 + p.size,
+                        bottom: p.y as i32 + p.size
+                    };
+                    let br = CreateSolidBrush(p.color);
+                    FillRect(mem_dc, &p_rect, br);
+                    DeleteObject(br as *mut winapi::ctypes::c_void);
+                }
+            } else {
+                // --- VẼ KHUNG TEXT CHÍNH ---
+                let hrgn = CreateRoundRectRgn(0, 0, rect.right, rect.bottom, 8, 8);
+                let bg_br = CreateSolidBrush(0x00000000); // Màu đen bán trong suốt (được set alpha ởCreateWindow)
+                FillRgn(mem_dc, hrgn, bg_br);
+                DeleteObject(bg_br as *mut winapi::ctypes::c_void);
+
+                // Hiệu ứng viền xanh khi di chuột
+                {
+                    let map_mutex = HOVER_MAP.get_or_init(|| Mutex::new(HashMap::new()));
+                    let map = map_mutex.lock().unwrap();
+                    if *map.get(&(hwnd as usize)).unwrap_or(&false) {
+                        let g_br = CreateSolidBrush(0x0000FF00);
+                        FrameRgn(mem_dc, hrgn, g_br, 2, 2);
+                        DeleteObject(g_br as *mut winapi::ctypes::c_void);
+                    }
+                }
+
+                // Cấu hình font chữ
+                SetBkMode(mem_dc, 1); // TRANSPARENT
+                SetTextColor(mem_dc, 0x00FFFFFF); // Màu trắng
+
                 let font_size = CURRENT_FONT_SIZE.load(Ordering::Relaxed);
-                let hfont = CreateFontW(font_size, 0, 0, 0, 400, 0, 0, 0, 0, 0, 0, 2, 0, to_wide("Roboto").as_ptr()); 
+                let hfont = CreateFontW(font_size, 0, 0, 0, 400, 0, 0, 0, 0, 0, 0, 2, 0, to_wide("Roboto").as_ptr());
                 let old_font = SelectObject(mem_dc, hfont as *mut winapi::ctypes::c_void);
-                let len = GetWindowTextLengthW(hwnd) + 1; let mut buf = vec![0u16; len as usize]; GetWindowTextW(hwnd, buf.as_mut_ptr(), len); let v_len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
-                let lines = break_text_into_lines(mem_dc, &buf[0..v_len], (rect.right - rect.left) - 20); let mut sz: SIZE = std::mem::zeroed(); GetTextExtentPoint32W(mem_dc, to_wide("A").as_ptr(), 1, &mut sz); let start_y = (rect.bottom - rect.top - (sz.cy * lines.len() as i32)) / 2;
-                for (i, line) in lines.iter().enumerate() { let y = start_y + (i as i32 * sz.cy); if i < lines.len() - 1 && line.spaces > 0 { SetTextJustification(mem_dc, ((rect.right - rect.left) - 20) - line.width, line.spaces as i32); TextOutW(mem_dc, 10, y, line.text.as_ptr(), line.text.len() as i32); SetTextJustification(mem_dc, 0, 0); } else { TextOutW(mem_dc, (rect.right - rect.left - line.width) / 2, y, line.text.as_ptr(), line.text.len() as i32); } }
-                SelectObject(mem_dc, old_font); DeleteObject(hfont as *mut winapi::ctypes::c_void); DeleteObject(hrgn as *mut winapi::ctypes::c_void);
+
+                // Lấy text và vẽ
+                let len = GetWindowTextLengthW(hwnd) + 1;
+                let mut buf = vec![0u16; len as usize];
+                GetWindowTextW(hwnd, buf.as_mut_ptr(), len);
+                let v_len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+
+                // Tự động xuống dòng
+                let lines = break_text_into_lines(mem_dc, &buf[0..v_len], (rect.right - rect.left) - 20);
+                let mut sz: SIZE = std::mem::zeroed();
+                GetTextExtentPoint32W(mem_dc, to_wide("A").as_ptr(), 1, &mut sz);
+
+                let start_y = (rect.bottom - rect.top - (sz.cy * lines.len() as i32)) / 2;
+
+                for (i, line) in lines.iter().enumerate() {
+                    let y = start_y + (i as i32 * sz.cy);
+                    // Căn đều (Justify) hoặc căn giữa
+                    if i < lines.len() - 1 && line.spaces > 0 {
+                        SetTextJustification(mem_dc, ((rect.right - rect.left) - 20) - line.width, line.spaces as i32);
+                        TextOutW(mem_dc, 10, y, line.text.as_ptr(), line.text.len() as i32);
+                        SetTextJustification(mem_dc, 0, 0);
+                    } else {
+                        TextOutW(mem_dc, (rect.right - rect.left - line.width) / 2, y, line.text.as_ptr(), line.text.len() as i32);
+                    }
+                }
+
+                SelectObject(mem_dc, old_font);
+                DeleteObject(hfont as *mut winapi::ctypes::c_void);
+                DeleteObject(hrgn as *mut winapi::ctypes::c_void);
             }
-            BitBlt(hdc, 0, 0, rect.right, rect.bottom, mem_dc, 0, 0, SRCCOPY); DeleteObject(mem_bm as *mut winapi::ctypes::c_void); DeleteDC(mem_dc); EndPaint(hwnd, &mut ps); 0
+
+            // Copy từ memory DC ra màn hình
+            BitBlt(hdc, 0, 0, rect.right, rect.bottom, mem_dc, 0, 0, SRCCOPY);
+            DeleteObject(mem_bm as *mut winapi::ctypes::c_void);
+            DeleteDC(mem_dc);
+            EndPaint(hwnd, &mut ps);
+            0
         }
-        WM_LBUTTONUP => { let mut r = RECT{left:0,top:0,right:0,bottom:0}; GetClientRect(hwnd, &mut r); let mut p = Vec::new(); let mut s = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().subsec_nanos(); for _ in 0..150 { let c = if simple_rng(&mut s)%100 < 80 { 0 } else if simple_rng(&mut s)%100 < 90 { 0x0000FF00 } else { 0x00FFFFFF }; p.push(Particle{x: get_random_f32(&mut s,0.0,r.right as f32), y: get_random_f32(&mut s,0.0,r.bottom as f32), vx: get_random_f32(&mut s,-8.0,8.0), vy: get_random_f32(&mut s,-8.0,5.0), size: (simple_rng(&mut s)%5+2) as i32, color: c}); } { let map_mutex = ANIMATION_MAP.get_or_init(|| Mutex::new(HashMap::new())); map_mutex.lock().unwrap().insert(hwnd as usize, p); } KillTimer(hwnd, 1); SetTimer(hwnd, 3, 16, None); 0 }
-        WM_TIMER => { if wparam == 1 { KillTimer(hwnd, 1); PostMessageW(hwnd, WM_CLOSE, 0, 0); } else if wparam == 3 { let mut close = false; { let map_mutex = ANIMATION_MAP.get_or_init(|| Mutex::new(HashMap::new())); let mut map = map_mutex.lock().unwrap(); if let Some(p) = map.get_mut(&(hwnd as usize)) { let mut cnt = 0; let mut r = RECT{left:0,top:0,right:0,bottom:0}; GetClientRect(hwnd, &mut r); for i in p.iter_mut() { i.x+=i.vx; i.y+=i.vy; i.vy+=0.5; if i.y < (r.bottom+100) as f32 { cnt+=1; } } if cnt == 0 { close = true; } } else { close = true; } } if close { KillTimer(hwnd, 3); PostMessageW(hwnd, WM_CLOSE, 0, 0); } else { InvalidateRect(hwnd, std::ptr::null(), 0); } } 0 }
-        WM_DESTROY => { { let mut map = HOVER_MAP.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap(); map.remove(&(hwnd as usize)); } { let mut map = ANIMATION_MAP.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap(); map.remove(&(hwnd as usize)); } { let mut list = OVERLAY_LIST.lock().unwrap(); list.retain(|&h| h != hwnd as usize); } PostQuitMessage(0); 0 }
-        WM_KEYDOWN => { if wparam == VK_ESCAPE as usize { PostMessageW(hwnd, WM_CLOSE, 0, 0); } 0 }
-        WM_SETCURSOR => { SetCursor(LoadCursorW(std::ptr::null_mut(), IDC_HAND)); 1 }
-        WM_MOUSEMOVE => { let anim = { ANIMATION_MAP.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap().contains_key(&(hwnd as usize)) }; if !anim { let map_mutex = HOVER_MAP.get_or_init(|| Mutex::new(HashMap::new())); let mut map = map_mutex.lock().unwrap(); if !*map.get(&(hwnd as usize)).unwrap_or(&false) { map.insert(hwnd as usize, true); let mut t = TRACKMOUSEEVENT{cbSize:std::mem::size_of::<TRACKMOUSEEVENT>() as u32, dwFlags:TME_LEAVE, hwndTrack:hwnd, dwHoverTime:0}; unsafe { TrackMouseEvent(&mut t); InvalidateRect(hwnd, std::ptr::null(), 0); } } } 0 }
-        WM_MOUSELEAVE => { let anim = { ANIMATION_MAP.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap().contains_key(&(hwnd as usize)) }; if !anim { HOVER_MAP.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap().insert(hwnd as usize, false); unsafe { InvalidateRect(hwnd, std::ptr::null(), 0); } } 0 }
+        WM_LBUTTONUP => {
+            // 1. Dừng đọc âm thanh ngay lập tức
+            crate::tts::stop();
+            // 2. Đóng cửa sổ Overlay ngay lập tức
+            PostMessageW(hwnd, WM_CLOSE, 0, 0);
+            0
+        }
+        WM_TIMER => {
+            if wparam == 1 {
+                KillTimer(hwnd, 1);
+                PostMessageW(hwnd, WM_CLOSE, 0, 0);
+            } else if wparam == 3 {
+                // Animation loop (cho particles cũ, giữ lại để không lỗi logic nếu có timer cũ)
+                let mut close = false;
+                {
+                    let map_mutex = ANIMATION_MAP.get_or_init(|| Mutex::new(HashMap::new()));
+                    let mut map = map_mutex.lock().unwrap();
+                    if let Some(p) = map.get_mut(&(hwnd as usize)) {
+                        let mut cnt = 0;
+                        let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+                        GetClientRect(hwnd, &mut r);
+                        for i in p.iter_mut() {
+                            i.x += i.vx;
+                            i.y += i.vy;
+                            i.vy += 0.5;
+                            if i.y < (r.bottom + 100) as f32 { cnt += 1; }
+                        }
+                        if cnt == 0 { close = true; }
+                    } else {
+                        close = true;
+                    }
+                }
+                if close {
+                    KillTimer(hwnd, 3);
+                    PostMessageW(hwnd, WM_CLOSE, 0, 0);
+                } else {
+                    InvalidateRect(hwnd, std::ptr::null(), 0);
+                }
+            }
+            0
+        }
+        WM_DESTROY => {
+            {
+                let mut map = HOVER_MAP.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap();
+                map.remove(&(hwnd as usize));
+            }
+            {
+                let mut map = ANIMATION_MAP.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap();
+                map.remove(&(hwnd as usize));
+            }
+            {
+                let mut list = OVERLAY_LIST.lock().unwrap();
+                list.retain(|&h| h != hwnd as usize);
+            }
+            PostQuitMessage(0);
+            0
+        }
+        WM_KEYDOWN => {
+            if wparam == VK_ESCAPE as usize {
+                PostMessageW(hwnd, WM_CLOSE, 0, 0);
+            }
+            0
+        }
+        WM_SETCURSOR => {
+            SetCursor(LoadCursorW(std::ptr::null_mut(), IDC_HAND));
+            1
+        }
+        WM_MOUSEMOVE => {
+            let anim = {
+                ANIMATION_MAP.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap().contains_key(&(hwnd as usize))
+            };
+            if !anim {
+                let map_mutex = HOVER_MAP.get_or_init(|| Mutex::new(HashMap::new()));
+                let mut map = map_mutex.lock().unwrap();
+                if !*map.get(&(hwnd as usize)).unwrap_or(&false) {
+                    map.insert(hwnd as usize, true);
+                    let mut t = TRACKMOUSEEVENT {
+                        cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                        dwFlags: TME_LEAVE,
+                        hwndTrack: hwnd,
+                        dwHoverTime: 0
+                    };
+                    unsafe {
+                        TrackMouseEvent(&mut t);
+                        InvalidateRect(hwnd, std::ptr::null(), 0);
+                    }
+                }
+            }
+            0
+        }
+        WM_MOUSELEAVE => {
+            let anim = {
+                ANIMATION_MAP.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap().contains_key(&(hwnd as usize))
+            };
+            if !anim {
+                HOVER_MAP.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap().insert(hwnd as usize, false);
+                unsafe {
+                    InvalidateRect(hwnd, std::ptr::null(), 0);
+                }
+            }
+            0
+        }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
     }
 }
