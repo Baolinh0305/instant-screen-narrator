@@ -98,7 +98,16 @@ pub fn is_template_present(region: &crate::config::Region, template_bytes: &[u8]
     }
 
     // Các tỷ lệ cần thử: 90%, 110%, 80%, 120%, 130%
-    let scales = [0.9, 1.1, 0.8, 1.2, 1.3]; 
+    // Mở rộng tỷ lệ quét từ 50% đến 150% để hỗ trợ màn hình độ phân giải thấp/cao
+    let scales = [
+        1.0,      // Thử kích thước gốc lần nữa cho chắc
+        0.9, 1.1,
+        0.8, 1.2,
+        0.75, 1.25,
+        0.7, 1.3,
+        0.6, 1.4, // Hỗ trợ khi màn hình nhỏ đi nhiều
+        0.5, 1.5  // Hỗ trợ khi màn hình cực nhỏ hoặc cực to
+    ];
     
     for scale in scales {
         let (orig_w, orig_h) = template_original.dimensions();
@@ -135,8 +144,10 @@ fn check_match_at_scale(haystack: &RgbaImage, needle: &RgbaImage) -> bool {
     if w_h < w_n || h_h < h_n { return false; }
 
     // Tăng dung sai lên chút để dễ bắt hơn
-    let color_tolerance = 70; 
-    let match_threshold = 0.80; // Giảm threshold xuống 80% cho dễ
+    // Tăng dung sai màu lên (vì khi scale ảnh bị mờ viền)
+    let color_tolerance = 90; // Cũ là 70
+    // Giảm ngưỡng chính xác xuống một chút
+    let match_threshold = 0.75; // Cũ là 0.80
 
     let limit_x = w_h - w_n;
     let limit_y = h_h - h_n;
