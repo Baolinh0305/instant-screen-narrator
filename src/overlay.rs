@@ -44,9 +44,12 @@ static mut IS_DRAGGING: bool = false;
 static OVERLAY_LIST: Mutex<Vec<usize>> = Mutex::new(Vec::new());
 static HOVER_MAP: OnceLock<Mutex<HashMap<usize, bool>>> = OnceLock::new();
 
-static SELECTION_MODE: AtomicU8 = AtomicU8::new(0); 
+static SELECTION_MODE: AtomicU8 = AtomicU8::new(0);
 static DEBUG_ACTIVE: AtomicBool = AtomicBool::new(false);
 static CURRENT_FONT_SIZE: AtomicI32 = AtomicI32::new(24);
+
+// --- THÊM DÒNG NÀY: Biến lưu trạng thái debug mũi tên ---
+pub static ARROW_DEBUG_STATE: AtomicBool = AtomicBool::new(false);
 
 static mut FROZEN_BITMAP: HBITMAP = std::ptr::null_mut();
 
@@ -154,8 +157,17 @@ unsafe extern "system" fn debug_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, l
             SetBkMode(hdc, TRANSPARENT as i32);
             
             let debug_txt = to_wide("DEBUG MODE: ON");
-            SetTextColor(hdc, 0x0000FF00); 
+            SetTextColor(hdc, 0x0000FF00);
             TextOutW(hdc, 10, 10, debug_txt.as_ptr(), debug_txt.len() as i32);
+
+            // --- VẼ TRẠNG THÁI MŨI TÊN ---
+            let is_found = ARROW_DEBUG_STATE.load(Ordering::Relaxed);
+            let status_text = if is_found { "MŨI TÊN: TÌM THẤY (FOUND)" } else { "MŨI TÊN: KHÔNG THẤY (MISSING)" };
+            let wide_status = to_wide(status_text);
+            let color = if is_found { 0x0000FF00 } else { 0x000000FF }; // Xanh lá nếu thấy, Đỏ nếu không
+            SetTextColor(hdc, color);
+            TextOutW(hdc, 10, 40, wide_status.as_ptr(), wide_status.len() as i32);
+            // -----------------------------
 
             let cfg = config::Config::load();
             let vx = GetSystemMetrics(SM_XVIRTUALSCREEN); 

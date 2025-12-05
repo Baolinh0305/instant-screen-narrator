@@ -417,6 +417,11 @@ impl MainApp {
 
                 if let Some(arrow_region) = &config.arrow_region {
                     let found = capture::is_template_present(arrow_region, &arrow_bytes);
+
+                    // --- THÊM DÒNG NÀY ĐỂ CẬP NHẬT TRẠNG THÁI DEBUG ---
+                    crate::overlay::ARROW_DEBUG_STATE.store(found, Ordering::Relaxed);
+                    // --------------------------------------------------
+
                     if found {
                         miss_counter = 0; 
                         if !last_found_state {

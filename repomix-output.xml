@@ -217,6 +217,124 @@ pub fn get_name_from_vk(vk: i32) -> String {
 }
 </file>
 
+<file path="src/translation.rs">
+use reqwest;
+use serde::{Deserialize, Serialize};
+use base64::{Engine as _, engine::general_purpose};
+use anyhow::Result;
+
+// --- STRUCTURES ---
+#[derive(Serialize)]
+struct GeminiRequest { contents: Vec<Content> }
+#[derive(Serialize)]
+struct Content { parts: Vec<Part> }
+#[derive(Serialize)]
+struct Part { text: Option<String>, inline_data: Option<InlineData> }
+#[derive(Serialize)]
+struct InlineData { mime_type: String, data: String }
+#[derive(Deserialize)]
+struct GeminiResponse { candidates: Vec<Candidate> }
+#[derive(Deserialize)]
+struct Candidate { content: ContentResponse }
+#[derive(Deserialize)]
+struct ContentResponse { parts: Vec<PartResponse> }
+#[derive(Deserialize)]
+struct PartResponse { text: String }
+
+pub struct TranslationResult {
+    pub text: String,
+    pub remaining_requests: Option<i32>,
+}
+
+#[derive(Debug)]
+pub enum TranslationError {
+    RateLimitExceeded,
+    Other(anyhow::Error),
+}
+
+// --- GEMINI ---
+pub async fn translate_with_gemini_image(api_key: &str, prompt: &str, image_bytes: &[u8]) -> Result<TranslationResult, TranslationError> {
+    let client = reqwest::Client::new();
+    let b64 = general_purpose::STANDARD.encode(image_bytes);
+    let request = GeminiRequest {
+        contents: vec![Content {
+            parts: vec![
+                Part { text: Some(prompt.to_string()), inline_data: None },
+                Part { text: None, inline_data: Some(InlineData { mime_type: "image/png".to_string(), data: b64 }) },
+            ],
+        }],
+    };
+    let url = format!("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key={}", api_key);
+    
+    let response = client.post(&url).header("Content-Type", "application/json").json(&request).send().await.map_err(|e| TranslationError::Other(e.into()))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        if status.as_u16() == 429 { return Err(TranslationError::RateLimitExceeded); }
+        return Err(TranslationError::Other(anyhow::anyhow!("Gemini Error {}", status)));
+    }
+
+    let resp_json: GeminiResponse = response.json().await.map_err(|e| TranslationError::Other(e.into()))?;
+    if resp_json.candidates.is_empty() { return Err(TranslationError::Other(anyhow::anyhow!("No candidates"))); }
+    let text = resp_json.candidates[0].content.parts[0].text.trim().to_string();
+    
+    Ok(TranslationResult { text, remaining_requests: None })
+}
+
+// --- GROQ ---
+pub async fn translate_with_groq_image(api_key: &str, prompt: &str, image_bytes: &[u8]) -> Result<TranslationResult, TranslationError> {
+    let client = reqwest::Client::new();
+    let b64 = general_purpose::STANDARD.encode(image_bytes);
+    let request = serde_json::json!({
+        "model": "meta-llama/llama-4-scout-17b-16e-instruct",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    { "type": "text", "text": prompt },
+                    { "type": "image_url", "image_url": { "url": format!("data:image/png;base64,{}", b64) } }
+                ]
+            }
+        ],
+        "temperature": 0.1
+    });
+    let url = "https://api.groq.com/openai/v1/chat/completions";
+    
+    let response = client.post(url)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Content-Type", "application/json")
+        .json(&request)
+        .send()
+        .await
+        .map_err(|e| TranslationError::Other(e.into()))?;
+
+    let status = response.status();
+    let remaining = response.headers().get("x-ratelimit-remaining-requests").and_then(|h| h.to_str().ok()).and_then(|s| s.parse::<i32>().ok());
+
+    if !status.is_success() {
+        if status.as_u16() == 429 { return Err(TranslationError::RateLimitExceeded); }
+        let body = response.text().await.unwrap_or_default();
+        return Err(TranslationError::Other(anyhow::anyhow!("Groq Error {}: {}", status, body)));
+    }
+
+    let resp_json: serde_json::Value = response.json().await.map_err(|e| TranslationError::Other(e.into()))?;
+    
+    if let Some(content) = resp_json["choices"][0]["message"]["content"].as_str() {
+        Ok(TranslationResult { text: content.trim().to_string(), remaining_requests: remaining })
+    } else {
+        Err(TranslationError::Other(anyhow::anyhow!("Invalid Groq response")))
+    }
+}
+
+pub async fn translate_from_image(api: &str, key: &str, prompt: &str, image_bytes: &[u8]) -> Result<TranslationResult, TranslationError> {
+    match api {
+        "gemini" => translate_with_gemini_image(key, prompt, image_bytes).await,
+        "groq" => translate_with_groq_image(key, prompt, image_bytes).await,
+        _ => Err(TranslationError::Other(anyhow::anyhow!("Invalid API"))),
+    }
+}
+</file>
+
 <file path="src/overlay.rs">
 use winapi::shared::windef::{POINT, RECT, HWND, SIZE, HBITMAP};
 use winapi::shared::minwindef::{WPARAM, LPARAM, LRESULT};
@@ -746,141 +864,207 @@ pub fn show_result_window(target_rect: RECT, text: String, duration_ms: u32) {
 
 unsafe extern "system" fn result_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
+        WM_PAINT => {
+            let mut ps: PAINTSTRUCT = std::mem::zeroed();
+            let hdc = BeginPaint(hwnd, &mut ps);
+            let mut rect: RECT = std::mem::zeroed();
+            GetClientRect(hwnd, &mut rect);
+
+            // Double buffering để tránh giật hình
+            let mem_dc = CreateCompatibleDC(hdc);
+            let mem_bm = CreateCompatibleBitmap(hdc, rect.right, rect.bottom);
+            SelectObject(mem_dc, mem_bm as *mut winapi::ctypes::c_void);
+
+            // Xóa nền (Fill background)
+            let k_br = CreateSolidBrush(0x00FF00FF); // Màu key (sẽ trong suốt)
+            FillRect(mem_dc, &rect, k_br);
+            DeleteObject(k_br as *mut winapi::ctypes::c_void);
+
+            // Kiểm tra xem có hiệu ứng hạt không (dù đã tắt tạo hạt, vẫn giữ logic vẽ để tránh lỗi)
+            let particles_opt = {
+                let map_mutex = ANIMATION_MAP.get_or_init(|| Mutex::new(HashMap::new()));
+                let map = map_mutex.lock().unwrap();
+                map.get(&(hwnd as usize)).cloned()
+            };
+
+            if let Some(particles) = particles_opt {
+                for p in particles {
+                    let p_rect = RECT {
+                        left: p.x as i32,
+                        top: p.y as i32,
+                        right: p.x as i32 + p.size,
+                        bottom: p.y as i32 + p.size
+                    };
+                    let br = CreateSolidBrush(p.color);
+                    FillRect(mem_dc, &p_rect, br);
+                    DeleteObject(br as *mut winapi::ctypes::c_void);
+                }
+            } else {
+                // --- VẼ KHUNG TEXT CHÍNH ---
+                let hrgn = CreateRoundRectRgn(0, 0, rect.right, rect.bottom, 8, 8);
+                let bg_br = CreateSolidBrush(0x00000000); // Màu đen bán trong suốt (được set alpha ởCreateWindow)
+                FillRgn(mem_dc, hrgn, bg_br);
+                DeleteObject(bg_br as *mut winapi::ctypes::c_void);
+
+                // Hiệu ứng viền xanh khi di chuột
+                {
+                    let map_mutex = HOVER_MAP.get_or_init(|| Mutex::new(HashMap::new()));
+                    let map = map_mutex.lock().unwrap();
+                    if *map.get(&(hwnd as usize)).unwrap_or(&false) {
+                        let g_br = CreateSolidBrush(0x0000FF00);
+                        FrameRgn(mem_dc, hrgn, g_br, 2, 2);
+                        DeleteObject(g_br as *mut winapi::ctypes::c_void);
+                    }
+                }
+
+                // Cấu hình font chữ
+                SetBkMode(mem_dc, 1); // TRANSPARENT
+                SetTextColor(mem_dc, 0x00FFFFFF); // Màu trắng
+
+                let font_size = CURRENT_FONT_SIZE.load(Ordering::Relaxed);
+                let hfont = CreateFontW(font_size, 0, 0, 0, 400, 0, 0, 0, 0, 0, 0, 2, 0, to_wide("Roboto").as_ptr());
+                let old_font = SelectObject(mem_dc, hfont as *mut winapi::ctypes::c_void);
+
+                // Lấy text và vẽ
+                let len = GetWindowTextLengthW(hwnd) + 1;
+                let mut buf = vec![0u16; len as usize];
+                GetWindowTextW(hwnd, buf.as_mut_ptr(), len);
+                let v_len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+
+                // Tự động xuống dòng
+                let lines = break_text_into_lines(mem_dc, &buf[0..v_len], (rect.right - rect.left) - 20);
+                let mut sz: SIZE = std::mem::zeroed();
+                GetTextExtentPoint32W(mem_dc, to_wide("A").as_ptr(), 1, &mut sz);
+
+                let start_y = (rect.bottom - rect.top - (sz.cy * lines.len() as i32)) / 2;
+
+                for (i, line) in lines.iter().enumerate() {
+                    let y = start_y + (i as i32 * sz.cy);
+                    // Căn đều (Justify) hoặc căn giữa
+                    if i < lines.len() - 1 && line.spaces > 0 {
+                        SetTextJustification(mem_dc, ((rect.right - rect.left) - 20) - line.width, line.spaces as i32);
+                        TextOutW(mem_dc, 10, y, line.text.as_ptr(), line.text.len() as i32);
+                        SetTextJustification(mem_dc, 0, 0);
+                    } else {
+                        TextOutW(mem_dc, (rect.right - rect.left - line.width) / 2, y, line.text.as_ptr(), line.text.len() as i32);
+                    }
+                }
+
+                SelectObject(mem_dc, old_font);
+                DeleteObject(hfont as *mut winapi::ctypes::c_void);
+                DeleteObject(hrgn as *mut winapi::ctypes::c_void);
+            }
+
+            // Copy từ memory DC ra màn hình
+            BitBlt(hdc, 0, 0, rect.right, rect.bottom, mem_dc, 0, 0, SRCCOPY);
+            DeleteObject(mem_bm as *mut winapi::ctypes::c_void);
+            DeleteDC(mem_dc);
+            EndPaint(hwnd, &mut ps);
+            0
+        }
         WM_LBUTTONUP => {
             // 1. Dừng đọc âm thanh ngay lập tức
             crate::tts::stop();
-
             // 2. Đóng cửa sổ Overlay ngay lập tức
             PostMessageW(hwnd, WM_CLOSE, 0, 0);
-
-            // (Đã xóa phần hiệu ứng particle cũ vì nó làm chậm thao tác đóng)
             0
         }
-        WM_TIMER => { if wparam == 1 { KillTimer(hwnd, 1); PostMessageW(hwnd, WM_CLOSE, 0, 0); } else if wparam == 3 { let mut close = false; { let map_mutex = ANIMATION_MAP.get_or_init(|| Mutex::new(HashMap::new())); let mut map = map_mutex.lock().unwrap(); if let Some(p) = map.get_mut(&(hwnd as usize)) { let mut cnt = 0; let mut r = RECT{left:0,top:0,right:0,bottom:0}; GetClientRect(hwnd, &mut r); for i in p.iter_mut() { i.x+=i.vx; i.y+=i.vy; i.vy+=0.5; if i.y < (r.bottom+100) as f32 { cnt+=1; } } if cnt == 0 { close = true; } } else { close = true; } } if close { KillTimer(hwnd, 3); PostMessageW(hwnd, WM_CLOSE, 0, 0); } else { InvalidateRect(hwnd, std::ptr::null(), 0); } } 0 }
-        WM_DESTROY => { { let mut map = HOVER_MAP.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap(); map.remove(&(hwnd as usize)); } { let mut map = ANIMATION_MAP.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap(); map.remove(&(hwnd as usize)); } { let mut list = OVERLAY_LIST.lock().unwrap(); list.retain(|&h| h != hwnd as usize); } PostQuitMessage(0); 0 }
-        WM_KEYDOWN => { if wparam == VK_ESCAPE as usize { PostMessageW(hwnd, WM_CLOSE, 0, 0); } 0 }
-        WM_SETCURSOR => { SetCursor(LoadCursorW(std::ptr::null_mut(), IDC_HAND)); 1 }
-        WM_MOUSEMOVE => { let anim = { ANIMATION_MAP.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap().contains_key(&(hwnd as usize)) }; if !anim { let map_mutex = HOVER_MAP.get_or_init(|| Mutex::new(HashMap::new())); let mut map = map_mutex.lock().unwrap(); if !*map.get(&(hwnd as usize)).unwrap_or(&false) { map.insert(hwnd as usize, true); let mut t = TRACKMOUSEEVENT{cbSize:std::mem::size_of::<TRACKMOUSEEVENT>() as u32, dwFlags:TME_LEAVE, hwndTrack:hwnd, dwHoverTime:0}; unsafe { TrackMouseEvent(&mut t); InvalidateRect(hwnd, std::ptr::null(), 0); } } } 0 }
-        WM_MOUSELEAVE => { let anim = { ANIMATION_MAP.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap().contains_key(&(hwnd as usize)) }; if !anim { HOVER_MAP.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap().insert(hwnd as usize, false); unsafe { InvalidateRect(hwnd, std::ptr::null(), 0); } } 0 }
-        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
-    }
-}
-</file>
-
-<file path="src/translation.rs">
-use reqwest;
-use serde::{Deserialize, Serialize};
-use base64::{Engine as _, engine::general_purpose};
-use anyhow::Result;
-
-// --- STRUCTURES ---
-#[derive(Serialize)]
-struct GeminiRequest { contents: Vec<Content> }
-#[derive(Serialize)]
-struct Content { parts: Vec<Part> }
-#[derive(Serialize)]
-struct Part { text: Option<String>, inline_data: Option<InlineData> }
-#[derive(Serialize)]
-struct InlineData { mime_type: String, data: String }
-#[derive(Deserialize)]
-struct GeminiResponse { candidates: Vec<Candidate> }
-#[derive(Deserialize)]
-struct Candidate { content: ContentResponse }
-#[derive(Deserialize)]
-struct ContentResponse { parts: Vec<PartResponse> }
-#[derive(Deserialize)]
-struct PartResponse { text: String }
-
-pub struct TranslationResult {
-    pub text: String,
-    pub remaining_requests: Option<i32>,
-}
-
-#[derive(Debug)]
-pub enum TranslationError {
-    RateLimitExceeded,
-    Other(anyhow::Error),
-}
-
-// --- GEMINI ---
-pub async fn translate_with_gemini_image(api_key: &str, prompt: &str, image_bytes: &[u8]) -> Result<TranslationResult, TranslationError> {
-    let client = reqwest::Client::new();
-    let b64 = general_purpose::STANDARD.encode(image_bytes);
-    let request = GeminiRequest {
-        contents: vec![Content {
-            parts: vec![
-                Part { text: Some(prompt.to_string()), inline_data: None },
-                Part { text: None, inline_data: Some(InlineData { mime_type: "image/png".to_string(), data: b64 }) },
-            ],
-        }],
-    };
-    let url = format!("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key={}", api_key);
-    
-    let response = client.post(&url).header("Content-Type", "application/json").json(&request).send().await.map_err(|e| TranslationError::Other(e.into()))?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        if status.as_u16() == 429 { return Err(TranslationError::RateLimitExceeded); }
-        return Err(TranslationError::Other(anyhow::anyhow!("Gemini Error {}", status)));
-    }
-
-    let resp_json: GeminiResponse = response.json().await.map_err(|e| TranslationError::Other(e.into()))?;
-    if resp_json.candidates.is_empty() { return Err(TranslationError::Other(anyhow::anyhow!("No candidates"))); }
-    let text = resp_json.candidates[0].content.parts[0].text.trim().to_string();
-    
-    Ok(TranslationResult { text, remaining_requests: None })
-}
-
-// --- GROQ ---
-pub async fn translate_with_groq_image(api_key: &str, prompt: &str, image_bytes: &[u8]) -> Result<TranslationResult, TranslationError> {
-    let client = reqwest::Client::new();
-    let b64 = general_purpose::STANDARD.encode(image_bytes);
-    let request = serde_json::json!({
-        "model": "meta-llama/llama-4-scout-17b-16e-instruct",
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    { "type": "text", "text": prompt },
-                    { "type": "image_url", "image_url": { "url": format!("data:image/png;base64,{}", b64) } }
-                ]
+        WM_TIMER => {
+            if wparam == 1 {
+                KillTimer(hwnd, 1);
+                PostMessageW(hwnd, WM_CLOSE, 0, 0);
+            } else if wparam == 3 {
+                // Animation loop (cho particles cũ, giữ lại để không lỗi logic nếu có timer cũ)
+                let mut close = false;
+                {
+                    let map_mutex = ANIMATION_MAP.get_or_init(|| Mutex::new(HashMap::new()));
+                    let mut map = map_mutex.lock().unwrap();
+                    if let Some(p) = map.get_mut(&(hwnd as usize)) {
+                        let mut cnt = 0;
+                        let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+                        GetClientRect(hwnd, &mut r);
+                        for i in p.iter_mut() {
+                            i.x += i.vx;
+                            i.y += i.vy;
+                            i.vy += 0.5;
+                            if i.y < (r.bottom + 100) as f32 { cnt += 1; }
+                        }
+                        if cnt == 0 { close = true; }
+                    } else {
+                        close = true;
+                    }
+                }
+                if close {
+                    KillTimer(hwnd, 3);
+                    PostMessageW(hwnd, WM_CLOSE, 0, 0);
+                } else {
+                    InvalidateRect(hwnd, std::ptr::null(), 0);
+                }
             }
-        ],
-        "temperature": 0.1
-    });
-    let url = "https://api.groq.com/openai/v1/chat/completions";
-    
-    let response = client.post(url)
-        .header("Authorization", format!("Bearer {}", api_key))
-        .header("Content-Type", "application/json")
-        .json(&request)
-        .send()
-        .await
-        .map_err(|e| TranslationError::Other(e.into()))?;
-
-    let status = response.status();
-    let remaining = response.headers().get("x-ratelimit-remaining-requests").and_then(|h| h.to_str().ok()).and_then(|s| s.parse::<i32>().ok());
-
-    if !status.is_success() {
-        if status.as_u16() == 429 { return Err(TranslationError::RateLimitExceeded); }
-        let body = response.text().await.unwrap_or_default();
-        return Err(TranslationError::Other(anyhow::anyhow!("Groq Error {}: {}", status, body)));
-    }
-
-    let resp_json: serde_json::Value = response.json().await.map_err(|e| TranslationError::Other(e.into()))?;
-    
-    if let Some(content) = resp_json["choices"][0]["message"]["content"].as_str() {
-        Ok(TranslationResult { text: content.trim().to_string(), remaining_requests: remaining })
-    } else {
-        Err(TranslationError::Other(anyhow::anyhow!("Invalid Groq response")))
-    }
-}
-
-pub async fn translate_from_image(api: &str, key: &str, prompt: &str, image_bytes: &[u8]) -> Result<TranslationResult, TranslationError> {
-    match api {
-        "gemini" => translate_with_gemini_image(key, prompt, image_bytes).await,
-        "groq" => translate_with_groq_image(key, prompt, image_bytes).await,
-        _ => Err(TranslationError::Other(anyhow::anyhow!("Invalid API"))),
+            0
+        }
+        WM_DESTROY => {
+            {
+                let mut map = HOVER_MAP.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap();
+                map.remove(&(hwnd as usize));
+            }
+            {
+                let mut map = ANIMATION_MAP.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap();
+                map.remove(&(hwnd as usize));
+            }
+            {
+                let mut list = OVERLAY_LIST.lock().unwrap();
+                list.retain(|&h| h != hwnd as usize);
+            }
+            PostQuitMessage(0);
+            0
+        }
+        WM_KEYDOWN => {
+            if wparam == VK_ESCAPE as usize {
+                PostMessageW(hwnd, WM_CLOSE, 0, 0);
+            }
+            0
+        }
+        WM_SETCURSOR => {
+            SetCursor(LoadCursorW(std::ptr::null_mut(), IDC_HAND));
+            1
+        }
+        WM_MOUSEMOVE => {
+            let anim = {
+                ANIMATION_MAP.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap().contains_key(&(hwnd as usize))
+            };
+            if !anim {
+                let map_mutex = HOVER_MAP.get_or_init(|| Mutex::new(HashMap::new()));
+                let mut map = map_mutex.lock().unwrap();
+                if !*map.get(&(hwnd as usize)).unwrap_or(&false) {
+                    map.insert(hwnd as usize, true);
+                    let mut t = TRACKMOUSEEVENT {
+                        cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                        dwFlags: TME_LEAVE,
+                        hwndTrack: hwnd,
+                        dwHoverTime: 0
+                    };
+                    unsafe {
+                        TrackMouseEvent(&mut t);
+                        InvalidateRect(hwnd, std::ptr::null(), 0);
+                    }
+                }
+            }
+            0
+        }
+        WM_MOUSELEAVE => {
+            let anim = {
+                ANIMATION_MAP.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap().contains_key(&(hwnd as usize))
+            };
+            if !anim {
+                HOVER_MAP.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap().insert(hwnd as usize, false);
+                unsafe {
+                    InvalidateRect(hwnd, std::ptr::null(), 0);
+                }
+            }
+            0
+        }
+        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
     }
 }
 </file>
