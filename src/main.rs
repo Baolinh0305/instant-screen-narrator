@@ -8,7 +8,7 @@ mod overlay;
 mod key_utils;
 mod ui;
 
-use crate::overlay::show_result_window;
+use crate::overlay::{show_result_window, show_result_window_internal};
 use crate::ui::UiRenderer; 
 use eframe::egui;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
@@ -26,6 +26,7 @@ use webbrowser;
 use arboard::Clipboard;
 use std::sync::Arc;
 use std::time::Duration;
+use rand;
 
 use tray_icon::{TrayIconBuilder, TrayIcon, TrayIconEvent, MouseButton};
 use tray_icon::menu::{Menu, MenuItem, MenuEvent};
@@ -247,7 +248,7 @@ impl MainApp {
     async fn translate_regions(
         mut config: config::Config,
         regions: Vec<config::Region>,
-        tx: Sender<(String, bool, f32, bool)>,
+        tx: Sender<(String, bool, f32, bool, u64)>,
         should_copy: bool,
     ) {
         // 1. Chuẩn bị Prompt
@@ -344,12 +345,20 @@ impl MainApp {
                 }
             }
 
-            let _ = tx.send((cleaned_show.clone(), config.split_tts, config.speed, config.use_tts));
+            let req_id = rand::random::<u64>();
+            let _ = tx.send((cleaned_show.clone(), config.split_tts, config.speed, config.use_tts, req_id));
             if config.show_overlay {
                 if let Some(region) = regions.first() {
                     let rect = RECT { left: region.x, top: region.y, right: region.x + region.width as i32, bottom: region.y + region.height as i32 };
                     let duration_ms = (cleaned_show.chars().count() as f32 / 10.0 * 1000.0) as u32;
-                    std::thread::spawn(move || { show_result_window(rect, cleaned_show, duration_ms); });
+                    let text_final = cleaned_show.clone();
+                    let req_id_clone = req_id;
+                    std::thread::spawn(move || {
+                        // Nếu không update được (do không phải mode auto/không có loading), thì hiện cửa sổ mới
+                        if !overlay::update_loading_window(text_final.clone()) {
+                              overlay::show_result_window_internal(rect, text_final, duration_ms, false, req_id_clone);
+                        }
+                    });
                 }
             }
         }
@@ -381,12 +390,12 @@ impl MainApp {
     }
 
     fn start_service(&mut self) {
-        let (tx, rx) = std::sync::mpsc::channel::<(String, bool, f32, bool)>();
+        let (tx, rx) = std::sync::mpsc::channel::<(String, bool, f32, bool, u64)>();
 
         std::thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().unwrap();
-            while let Ok((text, split_tts, speed, use_tts)) = rx.recv() {
-                rt.block_on(async { if let Err(_e) = tts::speak(&text, split_tts, speed, use_tts).await {} });
+            while let Ok((text, split_tts, speed, use_tts, req_id)) = rx.recv() {
+                rt.block_on(async { if let Err(_e) = tts::speak(&text, split_tts, speed, use_tts, req_id).await {} });
             }
         });
 
@@ -423,8 +432,23 @@ impl MainApp {
                     // --------------------------------------------------
 
                     if found {
-                        miss_counter = 0; 
+                        miss_counter = 0;
                         if !last_found_state {
+                            // --- SỬA Ở ĐÂY: Hiện Loading Overlay ngay lập tức ---
+                            if config.show_overlay {
+                                if let Some(target_region) = config.fixed_regions.first() {
+                                    let rect = RECT {
+                                        left: target_region.x,
+                                        top: target_region.y,
+                                        right: target_region.x + target_region.width as i32,
+                                        bottom: target_region.y + target_region.height as i32
+                                    };
+                                    // Hiện cửa sổ loading "..."
+                                    std::thread::spawn(move || { overlay::show_loading_window(rect); });
+                                }
+                            }
+                            // ----------------------------------------------------
+
                             let tx_inner = tx_auto.clone();
                             let should_copy = config.auto_copy && !config.copy_instant_only;
                             rt.block_on(async { Self::translate_regions(config.clone(), config.fixed_regions.clone(), tx_inner, should_copy).await; });
@@ -913,18 +937,21 @@ fn main() -> Result<(), eframe::Error> {
 // --- THÊM HÀM NÀY VÀO CUỐI FILE ---
 pub fn show_toggle_notification(enabled: bool) {
     let text = if enabled { "Đã bật tự động dịch" } else { "Đã tắt tự động dịch" };
-    
+    let req_id = rand::random::<u64>();
+
     // 1. Phát âm thanh (TTS)
     let text_audio = text.to_string();
+    let req_id_tts = req_id;
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            let _ = crate::tts::speak(&text_audio, false, 1.2, true).await;
+            let _ = crate::tts::speak(&text_audio, false, 1.2, true, req_id_tts).await;
         });
     });
 
     // 2. Hiện thông báo trên màn hình
     let text_visual = text.to_string();
+    let req_id_overlay = req_id;
     std::thread::spawn(move || {
         unsafe {
             let screen_w = winapi::um::winuser::GetSystemMetrics(winapi::um::winuser::SM_CXSCREEN);
@@ -938,7 +965,7 @@ pub fn show_toggle_notification(enabled: bool) {
                 right: left + width,
                 bottom: top + height
             };
-            crate::overlay::show_result_window(rect, text_visual, 2000);
+            crate::overlay::show_result_window_internal(rect, text_visual, 2000, false, req_id_overlay);
         }
     });
 }

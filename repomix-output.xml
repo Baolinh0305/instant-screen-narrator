@@ -335,740 +335,6 @@ pub async fn translate_from_image(api: &str, key: &str, prompt: &str, image_byte
 }
 </file>
 
-<file path="src/overlay.rs">
-use winapi::shared::windef::{POINT, RECT, HWND, SIZE, HBITMAP};
-use winapi::shared::minwindef::{WPARAM, LPARAM, LRESULT};
-use winapi::um::winuser::{
-    GetSystemMetrics, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SM_CXVIRTUALSCREEN,
-    SM_CYVIRTUALSCREEN, CreateWindowExW, RegisterClassW, WNDCLASSW, UnregisterClassW,
-    SetLayeredWindowAttributes, LWA_ALPHA, LWA_COLORKEY, LoadCursorW, IDC_HAND, IDC_ARROW, FillRect,
-    FrameRect, InvalidateRect, SetCapture, ReleaseCapture, GetCursorPos, PostMessageW,
-    WM_CLOSE, WM_KEYDOWN, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_LBUTTONUP, WM_PAINT,
-    WM_DESTROY, VK_ESCAPE, BeginPaint, EndPaint, PAINTSTRUCT, GetMessageW,
-    TranslateMessage, DispatchMessageW, MSG, DefWindowProcW, PostQuitMessage,
-    WS_EX_LAYERED, WS_EX_TOPMOST, WS_EX_TOOLWINDOW, WS_POPUP, WS_VISIBLE, DrawTextW,
-    GetClientRect, GetWindowTextLengthW, GetWindowTextW,
-    DT_WORDBREAK, SetTimer, KillTimer, WM_TIMER, GetDC, ReleaseDC, DT_CALCRECT,
-    SetCursor, WM_SETCURSOR, TrackMouseEvent, TRACKMOUSEEVENT, TME_LEAVE, WM_MOUSELEAVE,
-    GetWindowRect, ShowWindow, SW_SHOW, IsWindow,
-    WS_EX_NOACTIVATE, UpdateWindow, WS_EX_TRANSPARENT 
-};
-use winapi::um::wingdi::{
-    CreateCompatibleDC, CreateCompatibleBitmap, SelectObject, DeleteObject, DeleteDC,
-    BitBlt, SRCCOPY, CreateSolidBrush, SetTextColor, CreateFontW, SetBkMode,
-    CreateRoundRectRgn, AddFontMemResourceEx, FrameRgn, FillRgn,
-    GetTextExtentPoint32W, SetTextJustification, TextOutW,
-    MoveToEx, LineTo, CreatePen, PS_SOLID, TRANSPARENT, PS_INSIDEFRAME,
-    PatBlt, SRCAND
-};
-use winapi::um::winuser::MoveWindow;
-use std::sync::Mutex;
-use winapi::um::libloaderapi::GetModuleHandleW;
-use std::ffi::OsStr;
-use std::os::windows::ffi::OsStrExt;
-use std::collections::HashMap;
-use std::sync::{OnceLock, Once, atomic::{AtomicU8, AtomicBool, AtomicI32, Ordering}};
-use std::time::{SystemTime, UNIX_EPOCH};
-
-use crate::config;
-
-#[derive(Clone, Copy)]
-struct Particle { x: f32, y: f32, vx: f32, vy: f32, size: i32, color: u32 }
-
-static ANIMATION_MAP: OnceLock<Mutex<HashMap<usize, Vec<Particle>>>> = OnceLock::new();
-static mut START_POS: POINT = POINT { x: 0, y: 0 };
-static mut CURR_POS: POINT = POINT { x: 0, y: 0 };
-static mut IS_DRAGGING: bool = false;
-static OVERLAY_LIST: Mutex<Vec<usize>> = Mutex::new(Vec::new());
-static HOVER_MAP: OnceLock<Mutex<HashMap<usize, bool>>> = OnceLock::new();
-
-static SELECTION_MODE: AtomicU8 = AtomicU8::new(0); 
-static DEBUG_ACTIVE: AtomicBool = AtomicBool::new(false);
-static CURRENT_FONT_SIZE: AtomicI32 = AtomicI32::new(24);
-
-static mut FROZEN_BITMAP: HBITMAP = std::ptr::null_mut();
-
-pub fn set_selection_mode(mode: u8) {
-    SELECTION_MODE.store(mode, Ordering::Relaxed);
-}
-
-pub fn set_font_size(size: i32) {
-    CURRENT_FONT_SIZE.store(size, Ordering::Relaxed);
-}
-
-pub fn is_debug_active() -> bool {
-    DEBUG_ACTIVE.load(Ordering::Relaxed)
-}
-
-fn to_wide(s: &str) -> Vec<u16> { OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect() }
-fn simple_rng(seed: &mut u32) -> u32 { *seed = seed.wrapping_mul(1103515245).wrapping_add(12345); (*seed / 65536) % 32768 }
-fn get_random_f32(seed: &mut u32, min: f32, max: f32) -> f32 { let r = simple_rng(seed) as f32 / 32768.0; min + r * (max - min) }
-
-struct TextLine { text: Vec<u16>, width: i32, spaces: i32 }
-
-unsafe fn break_text_into_lines(hdc: winapi::shared::windef::HDC, text: &[u16], max_width: i32) -> Vec<TextLine> {
-    let mut lines = Vec::new(); let mut words = Vec::new(); let mut current_word = Vec::new();
-    for &c in text { if c == 32 { if !current_word.is_empty() { words.push(current_word.clone()); current_word.clear(); } } else { current_word.push(c); } }
-    if !current_word.is_empty() { words.push(current_word); }
-    if words.is_empty() { return lines; }
-    let mut current_line = words[0].clone(); let mut size: SIZE = std::mem::zeroed();
-    GetTextExtentPoint32W(hdc, current_line.as_ptr(), current_line.len() as i32, &mut size);
-    let mut current_width = size.cx;
-    for i in 1..words.len() {
-        let word = &words[i]; let mut test_line = current_line.clone(); test_line.push(32); test_line.extend_from_slice(word);
-        GetTextExtentPoint32W(hdc, test_line.as_ptr(), test_line.len() as i32, &mut size);
-        if size.cx > max_width {
-            let spaces = current_line.iter().filter(|&&c| c == 32).count() as i32;
-            lines.push(TextLine { text: current_line, width: current_width, spaces });
-            current_line = word.clone(); GetTextExtentPoint32W(hdc, current_line.as_ptr(), current_line.len() as i32, &mut size); current_width = size.cx;
-        } else { current_line = test_line; current_width = size.cx; }
-    }
-    if !current_line.is_empty() { let spaces = current_line.iter().filter(|&&c| c == 32).count() as i32; lines.push(TextLine { text: current_line, width: current_width, spaces }); }
-    lines
-}
-
-pub fn toggle_debug_overlay() {
-    let current = DEBUG_ACTIVE.load(Ordering::Relaxed);
-    if current {
-        DEBUG_ACTIVE.store(false, Ordering::Relaxed);
-    } else {
-        DEBUG_ACTIVE.store(true, Ordering::Relaxed);
-        std::thread::spawn(|| {
-            unsafe {
-                let instance = GetModuleHandleW(std::ptr::null());
-                let class_name = to_wide("DebugOverlay");
-                let mut wc: WNDCLASSW = std::mem::zeroed();
-                wc.lpfnWndProc = Some(debug_wnd_proc);
-                wc.hInstance = instance;
-                wc.lpszClassName = class_name.as_ptr();
-                wc.hbrBackground = CreateSolidBrush(0x00000000); 
-                RegisterClassW(&wc);
-
-                let x = GetSystemMetrics(SM_XVIRTUALSCREEN);
-                let y = GetSystemMetrics(SM_YVIRTUALSCREEN);
-                let w = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-                let h = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-
-                let hwnd = CreateWindowExW(
-                    WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT,
-                    class_name.as_ptr(), to_wide("DebugRects").as_ptr(), WS_POPUP | WS_VISIBLE,
-                    x, y, w, h, std::ptr::null_mut(), std::ptr::null_mut(), instance, std::ptr::null_mut()
-                );
-
-                SetLayeredWindowAttributes(hwnd, 0x00000000, 0, LWA_COLORKEY);
-                SetTimer(hwnd, 1, 100, None);
-
-                let mut msg: MSG = std::mem::zeroed();
-                while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) != 0 {
-                    TranslateMessage(&msg); DispatchMessageW(&msg);
-                    if msg.message == WM_CLOSE { break; }
-                }
-                UnregisterClassW(class_name.as_ptr(), instance);
-            }
-        });
-    }
-}
-
-unsafe extern "system" fn debug_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    match msg {
-        WM_TIMER => {
-            if !DEBUG_ACTIVE.load(Ordering::Relaxed) {
-                KillTimer(hwnd, 1);
-                PostMessageW(hwnd, WM_CLOSE, 0, 0);
-            } else {
-                InvalidateRect(hwnd, std::ptr::null(), 0);
-            }
-            0
-        }
-        WM_PAINT => {
-            let mut ps: PAINTSTRUCT = std::mem::zeroed();
-            let hdc = BeginPaint(hwnd, &mut ps);
-            let mut r: RECT = std::mem::zeroed(); GetClientRect(hwnd, &mut r);
-            
-            let bg_brush = CreateSolidBrush(0x00000000);
-            FillRect(hdc, &r, bg_brush);
-            DeleteObject(bg_brush as *mut winapi::ctypes::c_void);
-
-            SetBkMode(hdc, TRANSPARENT as i32);
-            
-            let debug_txt = to_wide("DEBUG MODE: ON");
-            SetTextColor(hdc, 0x0000FF00); 
-            TextOutW(hdc, 10, 10, debug_txt.as_ptr(), debug_txt.len() as i32);
-
-            let cfg = config::Config::load();
-            let vx = GetSystemMetrics(SM_XVIRTUALSCREEN); 
-            let vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
-
-            let null_brush = winapi::um::wingdi::GetStockObject(winapi::um::wingdi::NULL_BRUSH as i32); 
-            let old_brush = SelectObject(hdc, null_brush);
-
-            if !cfg.fixed_regions.is_empty() {
-                let red_pen = CreatePen(PS_SOLID.try_into().unwrap(), 2, 0x000000FF); 
-                let old_pen = SelectObject(hdc, red_pen as *mut winapi::ctypes::c_void);
-                for region in &cfg.fixed_regions {
-                    let left = region.x - vx;
-                    let top = region.y - vy;
-                    let right = left + region.width as i32;
-                    let bottom = top + region.height as i32;
-                    winapi::um::wingdi::Rectangle(hdc, left, top, right, bottom);
-                    let txt = to_wide("Vùng Dịch");
-                    SetTextColor(hdc, 0x000000FF);
-                    TextOutW(hdc, left, top - 20, txt.as_ptr(), txt.len() as i32);
-                }
-                SelectObject(hdc, old_pen); DeleteObject(red_pen as *mut winapi::ctypes::c_void);
-            }
-            
-            if let Some(arrow) = &cfg.arrow_region {
-                let yellow_pen = CreatePen(PS_SOLID.try_into().unwrap(), 2, 0x0000FFFF); 
-                let old_pen = SelectObject(hdc, yellow_pen as *mut winapi::ctypes::c_void);
-                let left = arrow.x - vx;
-                let top = arrow.y - vy;
-                let right = left + arrow.width as i32;
-                let bottom = top + arrow.height as i32;
-                winapi::um::wingdi::Rectangle(hdc, left, top, right, bottom);
-                let txt = to_wide("Mũi Tên");
-                SetTextColor(hdc, 0x0000FFFF);
-                TextOutW(hdc, left, top - 20, txt.as_ptr(), txt.len() as i32);
-                SelectObject(hdc, old_pen); DeleteObject(yellow_pen as *mut winapi::ctypes::c_void);
-            }
-
-            if let Some(instant) = &cfg.instant_region {
-                let blue_pen = CreatePen(PS_SOLID.try_into().unwrap(), 2, 0x00FF0000);
-                let old_pen = SelectObject(hdc, blue_pen as *mut winapi::ctypes::c_void);
-                let left = instant.x - vx;
-                let top = instant.y - vy;
-                let right = left + instant.width as i32;
-                let bottom = top + instant.height as i32;
-                winapi::um::wingdi::Rectangle(hdc, left, top, right, bottom);
-                let txt = to_wide("Dịch Nhanh");
-                SetTextColor(hdc, 0x00FF0000);
-                TextOutW(hdc, left, top - 20, txt.as_ptr(), txt.len() as i32);
-                SelectObject(hdc, old_pen); DeleteObject(blue_pen as *mut winapi::ctypes::c_void);
-            }
-
-            SelectObject(hdc, old_brush);
-            EndPaint(hwnd, &mut ps); 0
-        }
-        WM_DESTROY => { PostQuitMessage(0); 0 }
-        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
-    }
-}
-
-pub fn show_selection_overlay() {
-    unsafe {
-        IS_DRAGGING = false;
-        let config = config::Config::load(); 
-
-        FROZEN_BITMAP = std::ptr::null_mut(); 
-        if config.freeze_screen {
-            let x = GetSystemMetrics(SM_XVIRTUALSCREEN);
-            let y = GetSystemMetrics(SM_YVIRTUALSCREEN);
-            let w = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-            let h = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-            
-            let hdc_screen = GetDC(std::ptr::null_mut());
-            let hdc_mem = CreateCompatibleDC(hdc_screen);
-            let hbm = CreateCompatibleBitmap(hdc_screen, w, h);
-            SelectObject(hdc_mem, hbm as *mut _);
-            BitBlt(hdc_mem, 0, 0, w, h, hdc_screen, x, y, SRCCOPY);
-            
-            FROZEN_BITMAP = hbm;
-            
-            DeleteDC(hdc_mem);
-            ReleaseDC(std::ptr::null_mut(), hdc_screen);
-        }
-
-        let instance = GetModuleHandleW(std::ptr::null());
-        let class_name = to_wide("SnippingOverlay");
-        let mut wc: WNDCLASSW = std::mem::zeroed();
-        wc.lpfnWndProc = Some(selection_wnd_proc);
-        wc.hInstance = instance;
-        wc.lpszClassName = class_name.as_ptr();
-        wc.hbrBackground = CreateSolidBrush(0x00FF00FF); 
-        RegisterClassW(&wc);
-
-        let x = GetSystemMetrics(SM_XVIRTUALSCREEN);
-        let y = GetSystemMetrics(SM_YVIRTUALSCREEN);
-        let w = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-        let h = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-
-        let ex_style = WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW;
-        let hwnd = CreateWindowExW(ex_style, class_name.as_ptr(), to_wide("Snipping").as_ptr(), WS_POPUP, x, y, w, h, std::ptr::null_mut(), std::ptr::null_mut(), instance, std::ptr::null_mut());
-        
-        if config.freeze_screen {
-             SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA);
-        } else {
-             SetLayeredWindowAttributes(hwnd, 0x00FF00FF, 100, LWA_ALPHA | LWA_COLORKEY);
-        }
-        
-        GetCursorPos(std::ptr::addr_of_mut!(CURR_POS));
-        ShowWindow(hwnd, SW_SHOW);
-
-        let mut msg: MSG = std::mem::zeroed();
-        while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) != 0 {
-            TranslateMessage(&msg); DispatchMessageW(&msg);
-            if msg.message == WM_CLOSE { break; }
-        }
-        
-        if !FROZEN_BITMAP.is_null() {
-            DeleteObject(FROZEN_BITMAP as *mut _);
-            FROZEN_BITMAP = std::ptr::null_mut();
-        }
-        
-        UnregisterClassW(class_name.as_ptr(), instance);
-    }
-}
-
-unsafe extern "system" fn selection_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    match msg {
-        WM_KEYDOWN => { if wparam == VK_ESCAPE as usize { PostMessageW(hwnd, WM_CLOSE, 0, 0); } 0 }
-        WM_LBUTTONDOWN => {
-            IS_DRAGGING = true; GetCursorPos(std::ptr::addr_of_mut!(START_POS)); CURR_POS = START_POS;
-            SetCapture(hwnd); InvalidateRect(hwnd, std::ptr::null(), 0); 
-            UpdateWindow(hwnd); 
-            0
-        }
-        WM_MOUSEMOVE => {
-            GetCursorPos(std::ptr::addr_of_mut!(CURR_POS));
-            InvalidateRect(hwnd, std::ptr::null(), 0); 
-            UpdateWindow(hwnd); 
-            0
-        }
-        WM_LBUTTONUP => {
-            if IS_DRAGGING {
-                IS_DRAGGING = false; ReleaseCapture();
-                let rect = RECT { left: START_POS.x.min(CURR_POS.x), top: START_POS.y.min(CURR_POS.y), right: START_POS.x.max(CURR_POS.x), bottom: START_POS.y.max(CURR_POS.y) };
-                if (rect.right - rect.left) > 10 && (rect.bottom - rect.top) > 10 {
-                    let region = config::Region { x: rect.left, y: rect.top, width: (rect.right - rect.left) as u32, height: (rect.bottom - rect.top) as u32 };
-                    let hwnd_usize = hwnd as usize;
-                    std::thread::spawn(move || { process_region(region); unsafe { PostMessageW(hwnd_usize as HWND, WM_CLOSE, 0, 0); } });
-                } else { PostMessageW(hwnd, WM_CLOSE, 0, 0); }
-            } 0
-        }
-        WM_SETCURSOR => {
-            let mode = SELECTION_MODE.load(Ordering::Relaxed);
-            if mode == 2 {
-                SetCursor(LoadCursorW(std::ptr::null_mut(), IDC_ARROW));
-            } else {
-                SetCursor(std::ptr::null_mut());
-            }
-            1 
-        }
-        WM_PAINT => {
-            let mut ps: PAINTSTRUCT = std::mem::zeroed();
-            let hdc = BeginPaint(hwnd, &mut ps);
-            let mem_dc = CreateCompatibleDC(hdc);
-            let w = GetSystemMetrics(SM_CXVIRTUALSCREEN); let h = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-            let vx = GetSystemMetrics(SM_XVIRTUALSCREEN); let vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
-
-            let mem_bm = CreateCompatibleBitmap(hdc, w, h); SelectObject(mem_dc, mem_bm as *mut winapi::ctypes::c_void);
-            let mode = SELECTION_MODE.load(Ordering::Relaxed);
-
-            if !FROZEN_BITMAP.is_null() {
-                // === FREEZE MODE ===
-                let hdc_src = CreateCompatibleDC(hdc);
-                SelectObject(hdc_src, FROZEN_BITMAP as *mut _);
-                
-                // 1. Draw source
-                BitBlt(mem_dc, 0, 0, w, h, hdc_src, 0, 0, SRCCOPY);
-                
-                // 2. Dim screen
-                let dim_brush = CreateSolidBrush(0x00404040); 
-                let old_brush = SelectObject(mem_dc, dim_brush as *mut _);
-                PatBlt(mem_dc, 0, 0, w, h, SRCAND); 
-                SelectObject(mem_dc, old_brush);
-                DeleteObject(dim_brush as *mut _);
-
-                // 3. Border
-                let pen_screen_border = CreatePen(PS_INSIDEFRAME as i32, 6, 0x00FF0000); // Blue (BGR)
-                let old_pen_border = SelectObject(mem_dc, pen_screen_border as *mut _);
-                let null_brush = winapi::um::wingdi::GetStockObject(winapi::um::wingdi::NULL_BRUSH as i32);
-                let old_br_border = SelectObject(mem_dc, null_brush);
-                winapi::um::wingdi::Rectangle(mem_dc, 0, 0, w, h);
-                SelectObject(mem_dc, old_br_border);
-                SelectObject(mem_dc, old_pen_border);
-                DeleteObject(pen_screen_border as *mut _);
-
-                // 4. Dragging rect
-                if IS_DRAGGING {
-                     let r = RECT { 
-                        left: (START_POS.x.min(CURR_POS.x)) - vx, 
-                        top: (START_POS.y.min(CURR_POS.y)) - vy, 
-                        right: (START_POS.x.max(CURR_POS.x)) - vx, 
-                        bottom: (START_POS.y.max(CURR_POS.y)) - vy 
-                    };
-
-                    // Copy bright part from src
-                    BitBlt(mem_dc, r.left, r.top, r.right - r.left, r.bottom - r.top, 
-                           hdc_src, r.left, r.top, SRCCOPY);
-                    
-                    let color = if mode == 1 { 0x00FFFF00 } else if mode == 2 { 0x000080FF } else { 0x00FF00FF };
-                    let pen_border = CreatePen(PS_SOLID.try_into().unwrap(), 2, color);
-                    let old_pen = SelectObject(mem_dc, pen_border as *mut _);
-                    let old_br = SelectObject(mem_dc, null_brush);
-                    
-                    winapi::um::wingdi::Rectangle(mem_dc, r.left, r.top, r.right, r.bottom);
-                    
-                    SelectObject(mem_dc, old_br);
-                    SelectObject(mem_dc, old_pen);
-                    DeleteObject(pen_border as *mut _);
-                }
-
-                DeleteDC(hdc_src);
-
-            } else {
-                // === NORMAL MODE ===
-                let bg_brush = CreateSolidBrush(0x00000000); 
-                FillRect(mem_dc, &RECT{left:0,top:0,right:w,bottom:h}, bg_brush); 
-                DeleteObject(bg_brush as *mut winapi::ctypes::c_void);
-
-                if IS_DRAGGING {
-                    let r = RECT { 
-                        left: (START_POS.x.min(CURR_POS.x)) - vx, 
-                        top: (START_POS.y.min(CURR_POS.y)) - vy, 
-                        right: (START_POS.x.max(CURR_POS.x)) - vx, 
-                        bottom: (START_POS.y.max(CURR_POS.y)) - vy 
-                    };
-                    
-                    let color = if mode == 1 { 0x00FFFF00 } else if mode == 2 { 0x000080FF } else { 0x00FF00FF };
-                    let k_br = CreateSolidBrush(color); 
-                    FillRect(mem_dc, &r, k_br); 
-                    DeleteObject(k_br as *mut winapi::ctypes::c_void);
-
-                    let b_br = CreateSolidBrush(0x00FFFFFF); FrameRect(mem_dc, &r, b_br); DeleteObject(b_br as *mut winapi::ctypes::c_void);
-                }
-            }
-
-            if mode != 2 {
-                let cx = CURR_POS.x - vx;
-                let cy = CURR_POS.y - vy;
-                let pen = CreatePen(PS_SOLID.try_into().unwrap(), 2, 0x000000FF); 
-                let old_pen = SelectObject(mem_dc, pen as *mut winapi::ctypes::c_void);
-                MoveToEx(mem_dc, 0, cy, std::ptr::null_mut()); LineTo(mem_dc, w, cy);
-                MoveToEx(mem_dc, cx, 0, std::ptr::null_mut()); LineTo(mem_dc, cx, h);
-                SelectObject(mem_dc, old_pen); DeleteObject(pen as *mut winapi::ctypes::c_void);
-            }
-
-            BitBlt(hdc, 0, 0, w, h, mem_dc, 0, 0, SRCCOPY);
-            DeleteObject(mem_bm as *mut winapi::ctypes::c_void); DeleteDC(mem_dc); EndPaint(hwnd, &mut ps); 0
-        }
-        WM_DESTROY => { PostQuitMessage(0); 0 }
-        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
-    }
-}
-
-fn process_region(region: config::Region) {
-    let mut config = config::Config::load();
-    let mode = SELECTION_MODE.load(Ordering::Relaxed);
-    
-    if mode == 0 { 
-        config.fixed_regions.clear(); 
-        config.fixed_regions.push(region); 
-    } else if mode == 1 { 
-        config.arrow_region = Some(region); 
-    } else if mode == 2 { 
-        config.instant_region = Some(region); 
-    } else if mode >= 100 {
-        let idx = (mode - 100) as usize;
-        if idx < config.aux_regions.len() {
-            config.aux_regions[idx].region = Some(region);
-        }
-    }
-    config.save().unwrap();
-}
-
-pub fn show_highlight(rect: RECT) {
-    std::thread::spawn(move || {
-        unsafe {
-            let instance = GetModuleHandleW(std::ptr::null());
-            let class_name = to_wide("HighlightOverlay");
-            let mut wc: WNDCLASSW = std::mem::zeroed();
-            wc.lpfnWndProc = Some(highlight_wnd_proc);
-            wc.hInstance = instance;
-            wc.lpszClassName = class_name.as_ptr();
-            wc.hbrBackground = CreateSolidBrush(0x0000FF00); 
-            RegisterClassW(&wc);
-
-            let hwnd = CreateWindowExW(
-                WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
-                class_name.as_ptr(), to_wide("Highlight").as_ptr(), WS_POPUP | WS_VISIBLE,
-                rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top,
-                std::ptr::null_mut(), std::ptr::null_mut(), instance, std::ptr::null_mut()
-            );
-
-            SetLayeredWindowAttributes(hwnd, 0, 100, 0x00000002);
-            SetTimer(hwnd, 999, 3000, None);
-
-            let mut msg: MSG = std::mem::zeroed();
-            while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) != 0 {
-                TranslateMessage(&msg); DispatchMessageW(&msg);
-                if msg.message == WM_CLOSE { break; }
-            }
-            UnregisterClassW(class_name.as_ptr(), instance);
-        }
-    });
-}
-
-unsafe extern "system" fn highlight_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    match msg {
-        WM_PAINT => {
-            let mut ps: PAINTSTRUCT = std::mem::zeroed();
-            let hdc = BeginPaint(hwnd, &mut ps);
-            let mut r: RECT = std::mem::zeroed(); GetClientRect(hwnd, &mut r);
-            
-            let fill_brush = CreateSolidBrush(0x0000FF00);
-            FillRect(hdc, &r, fill_brush);
-            DeleteObject(fill_brush as *mut winapi::ctypes::c_void);
-
-            let border_brush = CreateSolidBrush(0x000000FF); 
-            FrameRect(hdc, &r, border_brush);
-            let mut r2 = r; r2.left += 1; r2.top += 1; r2.right -= 1; r2.bottom -= 1;
-            FrameRect(hdc, &r2, border_brush);
-            let mut r3 = r2; r3.left += 1; r3.top += 1; r3.right -= 1; r3.bottom -= 1;
-            FrameRect(hdc, &r3, border_brush);
-
-            DeleteObject(border_brush as *mut winapi::ctypes::c_void);
-            EndPaint(hwnd, &mut ps); 0
-        }
-        WM_TIMER => { if wparam == 999 { KillTimer(hwnd, 999); PostMessageW(hwnd, WM_CLOSE, 0, 0); } 0 }
-        WM_DESTROY => { PostQuitMessage(0); 0 }
-        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
-    }
-}
-
-static REGISTER_RESULT_CLASS: Once = Once::new();
-pub fn show_result_window(target_rect: RECT, text: String, duration_ms: u32) {
-    unsafe {
-        let instance = GetModuleHandleW(std::ptr::null()); let class_name = to_wide("TranslationResult");
-        REGISTER_RESULT_CLASS.call_once(|| { let mut wc: WNDCLASSW = std::mem::zeroed(); wc.lpfnWndProc = Some(result_wnd_proc); wc.hInstance = instance; wc.lpszClassName = class_name.as_ptr(); wc.hbrBackground = CreateSolidBrush(0x00FF00FF); wc.style = winapi::um::winuser::CS_HREDRAW | winapi::um::winuser::CS_VREDRAW; RegisterClassW(&wc); });
-        let region_width = (target_rect.right - target_rect.left).abs(); let hdc_screen = GetDC(std::ptr::null_mut()); 
-        
-        let font_size = CURRENT_FONT_SIZE.load(Ordering::Relaxed);
-        let hfont = CreateFontW(font_size, 0, 0, 0, 400, 0, 0, 0, 0, 0, 0, 2, 0, to_wide("Roboto").as_ptr()); 
-        
-        SelectObject(hdc_screen, hfont as *mut winapi::ctypes::c_void);
-        let padding = 10; let max_text_width = region_width - padding * 2; let mut text_rect = RECT { left: 0, top: 0, right: max_text_width, bottom: 0 }; let wide_text = to_wide(&text); DrawTextW(hdc_screen, wide_text.as_ptr(), -1, &mut text_rect, DT_CALCRECT | DT_WORDBREAK);
-        let text_height = text_rect.bottom - text_rect.top; DeleteObject(hfont as *mut winapi::ctypes::c_void); ReleaseDC(std::ptr::null_mut(), hdc_screen);
-        let height = text_height + padding * 2; let x = target_rect.left; let width = region_width as i32; let mut y = target_rect.top - height - 10; if y < 0 { y = target_rect.top + 10; }
-        let valid_hwnds: Vec<HWND> = { let mut list = OVERLAY_LIST.lock().unwrap(); list.retain(|&h| IsWindow(h as HWND) != 0); list.iter().map(|&h| h as HWND).collect() };
-        for hwnd in valid_hwnds { let mut rect = RECT { left: 0, top: 0, right: 0, bottom: 0 }; if GetWindowRect(hwnd, &mut rect) != 0 { MoveWindow(hwnd, rect.left, rect.top - height - 10, rect.right - rect.left, rect.bottom - rect.top, 1); } }
-        let font_data = include_bytes!("roboto.ttf"); let _ = AddFontMemResourceEx(font_data.as_ptr() as *mut winapi::ctypes::c_void, font_data.len() as u32, std::ptr::null_mut(), &mut 0);
-        
-        let hwnd = CreateWindowExW(
-            WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, 
-            class_name.as_ptr(), to_wide(&text).as_ptr(), WS_POPUP | WS_VISIBLE, x, y, width, height, std::ptr::null_mut(), std::ptr::null_mut(), instance, std::ptr::null_mut());
-        
-        if !hwnd.is_null() { { let mut list = OVERLAY_LIST.lock().unwrap(); list.push(hwnd as usize); } SetLayeredWindowAttributes(hwnd, 0x00FF00FF, 200, LWA_ALPHA | LWA_COLORKEY); SetTimer(hwnd, 1, duration_ms, None); let mut msg: MSG = std::mem::zeroed(); while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) != 0 { TranslateMessage(&msg); DispatchMessageW(&msg); if msg.message == WM_CLOSE { break; } } }
-    }
-}
-
-unsafe extern "system" fn result_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    match msg {
-        WM_PAINT => {
-            let mut ps: PAINTSTRUCT = std::mem::zeroed();
-            let hdc = BeginPaint(hwnd, &mut ps);
-            let mut rect: RECT = std::mem::zeroed();
-            GetClientRect(hwnd, &mut rect);
-
-            // Double buffering để tránh giật hình
-            let mem_dc = CreateCompatibleDC(hdc);
-            let mem_bm = CreateCompatibleBitmap(hdc, rect.right, rect.bottom);
-            SelectObject(mem_dc, mem_bm as *mut winapi::ctypes::c_void);
-
-            // Xóa nền (Fill background)
-            let k_br = CreateSolidBrush(0x00FF00FF); // Màu key (sẽ trong suốt)
-            FillRect(mem_dc, &rect, k_br);
-            DeleteObject(k_br as *mut winapi::ctypes::c_void);
-
-            // Kiểm tra xem có hiệu ứng hạt không (dù đã tắt tạo hạt, vẫn giữ logic vẽ để tránh lỗi)
-            let particles_opt = {
-                let map_mutex = ANIMATION_MAP.get_or_init(|| Mutex::new(HashMap::new()));
-                let map = map_mutex.lock().unwrap();
-                map.get(&(hwnd as usize)).cloned()
-            };
-
-            if let Some(particles) = particles_opt {
-                for p in particles {
-                    let p_rect = RECT {
-                        left: p.x as i32,
-                        top: p.y as i32,
-                        right: p.x as i32 + p.size,
-                        bottom: p.y as i32 + p.size
-                    };
-                    let br = CreateSolidBrush(p.color);
-                    FillRect(mem_dc, &p_rect, br);
-                    DeleteObject(br as *mut winapi::ctypes::c_void);
-                }
-            } else {
-                // --- VẼ KHUNG TEXT CHÍNH ---
-                let hrgn = CreateRoundRectRgn(0, 0, rect.right, rect.bottom, 8, 8);
-                let bg_br = CreateSolidBrush(0x00000000); // Màu đen bán trong suốt (được set alpha ởCreateWindow)
-                FillRgn(mem_dc, hrgn, bg_br);
-                DeleteObject(bg_br as *mut winapi::ctypes::c_void);
-
-                // Hiệu ứng viền xanh khi di chuột
-                {
-                    let map_mutex = HOVER_MAP.get_or_init(|| Mutex::new(HashMap::new()));
-                    let map = map_mutex.lock().unwrap();
-                    if *map.get(&(hwnd as usize)).unwrap_or(&false) {
-                        let g_br = CreateSolidBrush(0x0000FF00);
-                        FrameRgn(mem_dc, hrgn, g_br, 2, 2);
-                        DeleteObject(g_br as *mut winapi::ctypes::c_void);
-                    }
-                }
-
-                // Cấu hình font chữ
-                SetBkMode(mem_dc, 1); // TRANSPARENT
-                SetTextColor(mem_dc, 0x00FFFFFF); // Màu trắng
-
-                let font_size = CURRENT_FONT_SIZE.load(Ordering::Relaxed);
-                let hfont = CreateFontW(font_size, 0, 0, 0, 400, 0, 0, 0, 0, 0, 0, 2, 0, to_wide("Roboto").as_ptr());
-                let old_font = SelectObject(mem_dc, hfont as *mut winapi::ctypes::c_void);
-
-                // Lấy text và vẽ
-                let len = GetWindowTextLengthW(hwnd) + 1;
-                let mut buf = vec![0u16; len as usize];
-                GetWindowTextW(hwnd, buf.as_mut_ptr(), len);
-                let v_len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
-
-                // Tự động xuống dòng
-                let lines = break_text_into_lines(mem_dc, &buf[0..v_len], (rect.right - rect.left) - 20);
-                let mut sz: SIZE = std::mem::zeroed();
-                GetTextExtentPoint32W(mem_dc, to_wide("A").as_ptr(), 1, &mut sz);
-
-                let start_y = (rect.bottom - rect.top - (sz.cy * lines.len() as i32)) / 2;
-
-                for (i, line) in lines.iter().enumerate() {
-                    let y = start_y + (i as i32 * sz.cy);
-                    // Căn đều (Justify) hoặc căn giữa
-                    if i < lines.len() - 1 && line.spaces > 0 {
-                        SetTextJustification(mem_dc, ((rect.right - rect.left) - 20) - line.width, line.spaces as i32);
-                        TextOutW(mem_dc, 10, y, line.text.as_ptr(), line.text.len() as i32);
-                        SetTextJustification(mem_dc, 0, 0);
-                    } else {
-                        TextOutW(mem_dc, (rect.right - rect.left - line.width) / 2, y, line.text.as_ptr(), line.text.len() as i32);
-                    }
-                }
-
-                SelectObject(mem_dc, old_font);
-                DeleteObject(hfont as *mut winapi::ctypes::c_void);
-                DeleteObject(hrgn as *mut winapi::ctypes::c_void);
-            }
-
-            // Copy từ memory DC ra màn hình
-            BitBlt(hdc, 0, 0, rect.right, rect.bottom, mem_dc, 0, 0, SRCCOPY);
-            DeleteObject(mem_bm as *mut winapi::ctypes::c_void);
-            DeleteDC(mem_dc);
-            EndPaint(hwnd, &mut ps);
-            0
-        }
-        WM_LBUTTONUP => {
-            // 1. Dừng đọc âm thanh ngay lập tức
-            crate::tts::stop();
-            // 2. Đóng cửa sổ Overlay ngay lập tức
-            PostMessageW(hwnd, WM_CLOSE, 0, 0);
-            0
-        }
-        WM_TIMER => {
-            if wparam == 1 {
-                KillTimer(hwnd, 1);
-                PostMessageW(hwnd, WM_CLOSE, 0, 0);
-            } else if wparam == 3 {
-                // Animation loop (cho particles cũ, giữ lại để không lỗi logic nếu có timer cũ)
-                let mut close = false;
-                {
-                    let map_mutex = ANIMATION_MAP.get_or_init(|| Mutex::new(HashMap::new()));
-                    let mut map = map_mutex.lock().unwrap();
-                    if let Some(p) = map.get_mut(&(hwnd as usize)) {
-                        let mut cnt = 0;
-                        let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };
-                        GetClientRect(hwnd, &mut r);
-                        for i in p.iter_mut() {
-                            i.x += i.vx;
-                            i.y += i.vy;
-                            i.vy += 0.5;
-                            if i.y < (r.bottom + 100) as f32 { cnt += 1; }
-                        }
-                        if cnt == 0 { close = true; }
-                    } else {
-                        close = true;
-                    }
-                }
-                if close {
-                    KillTimer(hwnd, 3);
-                    PostMessageW(hwnd, WM_CLOSE, 0, 0);
-                } else {
-                    InvalidateRect(hwnd, std::ptr::null(), 0);
-                }
-            }
-            0
-        }
-        WM_DESTROY => {
-            {
-                let mut map = HOVER_MAP.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap();
-                map.remove(&(hwnd as usize));
-            }
-            {
-                let mut map = ANIMATION_MAP.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap();
-                map.remove(&(hwnd as usize));
-            }
-            {
-                let mut list = OVERLAY_LIST.lock().unwrap();
-                list.retain(|&h| h != hwnd as usize);
-            }
-            PostQuitMessage(0);
-            0
-        }
-        WM_KEYDOWN => {
-            if wparam == VK_ESCAPE as usize {
-                PostMessageW(hwnd, WM_CLOSE, 0, 0);
-            }
-            0
-        }
-        WM_SETCURSOR => {
-            SetCursor(LoadCursorW(std::ptr::null_mut(), IDC_HAND));
-            1
-        }
-        WM_MOUSEMOVE => {
-            let anim = {
-                ANIMATION_MAP.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap().contains_key(&(hwnd as usize))
-            };
-            if !anim {
-                let map_mutex = HOVER_MAP.get_or_init(|| Mutex::new(HashMap::new()));
-                let mut map = map_mutex.lock().unwrap();
-                if !*map.get(&(hwnd as usize)).unwrap_or(&false) {
-                    map.insert(hwnd as usize, true);
-                    let mut t = TRACKMOUSEEVENT {
-                        cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
-                        dwFlags: TME_LEAVE,
-                        hwndTrack: hwnd,
-                        dwHoverTime: 0
-                    };
-                    unsafe {
-                        TrackMouseEvent(&mut t);
-                        InvalidateRect(hwnd, std::ptr::null(), 0);
-                    }
-                }
-            }
-            0
-        }
-        WM_MOUSELEAVE => {
-            let anim = {
-                ANIMATION_MAP.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap().contains_key(&(hwnd as usize))
-            };
-            if !anim {
-                HOVER_MAP.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap().insert(hwnd as usize, false);
-                unsafe {
-                    InvalidateRect(hwnd, std::ptr::null(), 0);
-                }
-            }
-            0
-        }
-        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
-    }
-}
-</file>
-
 <file path="src/tts.rs">
 use reqwest;
 use rodio::{Decoder, OutputStream, Sink, Source};
@@ -1183,213 +449,690 @@ pub fn play_audio_data(data: Vec<u8>, speed: f32) -> Result<(), anyhow::Error> {
 }
 </file>
 
-<file path="src/capture.rs">
-use image::{DynamicImage, ImageFormat, imageops::FilterType, RgbaImage};
-use screenshots::Screen;
+<file path="src/overlay.rs">
+use winapi::shared::windef::{POINT, RECT, HWND, SIZE, HBITMAP};
+use winapi::shared::minwindef::{WPARAM, LPARAM, LRESULT, TRUE};
+use winapi::um::winuser::{
+    GetSystemMetrics, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SM_CXVIRTUALSCREEN,
+    SM_CYVIRTUALSCREEN, CreateWindowExW, RegisterClassW, WNDCLASSW, UnregisterClassW,
+    SetLayeredWindowAttributes, LWA_ALPHA, LWA_COLORKEY, LoadCursorW, IDC_HAND, IDC_ARROW, FillRect,
+    FrameRect, InvalidateRect, SetCapture, ReleaseCapture, GetCursorPos, PostMessageW,
+    WM_CLOSE, WM_KEYDOWN, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_LBUTTONUP, WM_PAINT,
+    WM_DESTROY, VK_ESCAPE, BeginPaint, EndPaint, PAINTSTRUCT, GetMessageW,
+    TranslateMessage, DispatchMessageW, MSG, DefWindowProcW, PostQuitMessage,
+    WS_EX_LAYERED, WS_EX_TOPMOST, WS_EX_TOOLWINDOW, WS_POPUP, WS_VISIBLE, DrawTextW,
+    GetClientRect, GetWindowTextLengthW, GetWindowTextW,
+    DT_WORDBREAK, SetTimer, KillTimer, WM_TIMER, GetDC, ReleaseDC, DT_CALCRECT,
+    SetCursor, WM_SETCURSOR, TrackMouseEvent, TRACKMOUSEEVENT, TME_LEAVE, WM_MOUSELEAVE,
+    GetWindowRect, ShowWindow, SW_SHOW, IsWindow,
+    WS_EX_NOACTIVATE, UpdateWindow, WS_EX_TRANSPARENT, FindWindowW, SetWindowTextW
+};
+use winapi::um::wingdi::{
+    CreateCompatibleDC, CreateCompatibleBitmap, SelectObject, DeleteObject, DeleteDC,
+    BitBlt, SRCCOPY, CreateSolidBrush, SetTextColor, CreateFontW, SetBkMode,
+    CreateRoundRectRgn, AddFontMemResourceEx, FrameRgn, FillRgn,
+    GetTextExtentPoint32W, SetTextJustification, TextOutW,
+    MoveToEx, LineTo, CreatePen, PS_SOLID, TRANSPARENT, PS_INSIDEFRAME,
+    PatBlt, SRCAND
+};
+use winapi::um::winuser::MoveWindow;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU8, Ordering};
+use winapi::um::libloaderapi::GetModuleHandleW;
+use std::ffi::OsStr;
+use std::os::windows::ffi::OsStrExt;
+use std::collections::HashMap;
+use std::sync::{OnceLock, Once, atomic::{AtomicU8, AtomicBool, AtomicI32, AtomicUsize, Ordering}};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-// Biến toàn cục để lưu lại "kích thước mũi tên đúng nhất"
-// Giúp lần sau không phải dò lại từ đầu -> Tiết kiệm CPU
-static CACHED_TEMPLATE: Mutex<Option<RgbaImage>> = Mutex::new(None);
+use crate::config;
 
-// Bộ đếm để hạn chế tần suất quét kỹ (tránh nổ máy khi không có mũi tên)
-static SCAN_COUNTER: AtomicU8 = AtomicU8::new(0);
+#[derive(Clone, Copy)]
+struct Particle { x: f32, y: f32, vx: f32, vy: f32, size: i32, color: u32 }
 
-/// Tìm màn hình chứa điểm (x, y)
-fn find_screen_containing(x: i32, y: i32, screens: &[Screen]) -> Option<&Screen> {
-    screens.iter().find(|s| {
-        let info = s.display_info;
-        x >= info.x 
-        && x < info.x + info.width as i32
-        && y >= info.y 
-        && y < info.y + info.height as i32
-    })
+static ANIMATION_MAP: OnceLock<Mutex<HashMap<usize, Vec<Particle>>>> = OnceLock::new();
+static mut START_POS: POINT = POINT { x: 0, y: 0 };
+static mut CURR_POS: POINT = POINT { x: 0, y: 0 };
+static mut IS_DRAGGING: bool = false;
+static OVERLAY_LIST: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+static HOVER_MAP: OnceLock<Mutex<HashMap<usize, bool>>> = OnceLock::new();
+
+static SELECTION_MODE: AtomicU8 = AtomicU8::new(0);
+static DEBUG_ACTIVE: AtomicBool = AtomicBool::new(false);
+static CURRENT_FONT_SIZE: AtomicI32 = AtomicI32::new(24);
+
+pub static ARROW_DEBUG_STATE: AtomicBool = AtomicBool::new(false);
+
+// --- Biến lưu handle của cửa sổ đang Loading "..." ---
+static PENDING_LOADING_HWND: AtomicUsize = AtomicUsize::new(0);
+
+static mut FROZEN_BITMAP: HBITMAP = std::ptr::null_mut();
+
+pub fn set_selection_mode(mode: u8) {
+    SELECTION_MODE.store(mode, Ordering::Relaxed);
 }
 
-pub fn capture_image(region: &crate::config::Region) -> Result<Vec<u8>, anyhow::Error> {
-    let screens = Screen::all()?;
-    if screens.is_empty() { return Err(anyhow::anyhow!("No screens found")); }
-    
-    let screen = find_screen_containing(region.x, region.y, &screens)
-        .unwrap_or(&screens[0]);
-
-    let relative_x = region.x - screen.display_info.x;
-    let relative_y = region.y - screen.display_info.y;
-
-    let image = screen.capture_area(relative_x, relative_y, region.width, region.height)?;
-    let img = DynamicImage::ImageRgba8(image);
-    let mut buffer = Vec::new();
-    img.write_to(&mut std::io::Cursor::new(&mut buffer), ImageFormat::Png)?;
-    Ok(buffer)
+pub fn set_font_size(size: i32) {
+    CURRENT_FONT_SIZE.store(size, Ordering::Relaxed);
 }
 
-pub fn is_template_present(region: &crate::config::Region, template_bytes: &[u8]) -> bool {
-    let screens = match Screen::all() {
-        Ok(s) => s,
-        Err(_) => return false,
-    };
-    if screens.is_empty() { return false; }
-    
-    // 1. Chụp màn hình (đúng màn hình chứa vùng chọn)
-    let screen = find_screen_containing(region.x, region.y, &screens)
-        .unwrap_or(&screens[0]);
+pub fn is_debug_active() -> bool {
+    DEBUG_ACTIVE.load(Ordering::Relaxed)
+}
 
-    let relative_x = region.x - screen.display_info.x;
-    let relative_y = region.y - screen.display_info.y;
+fn to_wide(s: &str) -> Vec<u16> { OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect() }
+fn simple_rng(seed: &mut u32) -> u32 { *seed = seed.wrapping_mul(1103515245).wrapping_add(12345); (*seed / 65536) % 32768 }
+fn get_random_f32(seed: &mut u32, min: f32, max: f32) -> f32 { let r = simple_rng(seed) as f32 / 32768.0; min + r * (max - min) }
 
-    let captured_image = match screen.capture_area(relative_x, relative_y, region.width, region.height) {
-        Ok(img) => DynamicImage::ImageRgba8(img),
-        Err(_) => return false,
-    };
+struct TextLine { text: Vec<u16>, width: i32, spaces: i32 }
 
-    let haystack = captured_image.to_rgba8();
+unsafe fn break_text_into_lines(hdc: winapi::shared::windef::HDC, text: &[u16], max_width: i32) -> Vec<TextLine> {
+    let mut lines = Vec::new(); let mut words = Vec::new(); let mut current_word = Vec::new();
+    for &c in text { if c == 32 { if !current_word.is_empty() { words.push(current_word.clone()); current_word.clear(); } } else { current_word.push(c); } }
+    if !current_word.is_empty() { words.push(current_word); }
+    if words.is_empty() { return lines; }
+    let mut current_line = words[0].clone(); let mut size: SIZE = std::mem::zeroed();
+    GetTextExtentPoint32W(hdc, current_line.as_ptr(), current_line.len() as i32, &mut size);
+    let mut current_width = size.cx;
+    for i in 1..words.len() {
+        let word = &words[i]; let mut test_line = current_line.clone(); test_line.push(32); test_line.extend_from_slice(word);
+        GetTextExtentPoint32W(hdc, test_line.as_ptr(), test_line.len() as i32, &mut size);
+        if size.cx > max_width {
+            let spaces = current_line.iter().filter(|&&c| c == 32).count() as i32;
+            lines.push(TextLine { text: current_line, width: current_width, spaces });
+            current_line = word.clone(); GetTextExtentPoint32W(hdc, current_line.as_ptr(), current_line.len() as i32, &mut size); current_width = size.cx;
+        } else { current_line = test_line; current_width = size.cx; }
+    }
+    if !current_line.is_empty() { let spaces = current_line.iter().filter(|&&c| c == 32).count() as i32; lines.push(TextLine { text: current_line, width: current_width, spaces }); }
+    lines
+}
 
-    // 2. Load template gốc từ bytes
-    let template_original = match image::load_from_memory(template_bytes) {
-        Ok(img) => img.to_rgba8(),
-        Err(_) => return false,
-    };
+pub fn toggle_debug_overlay() {
+    let current = DEBUG_ACTIVE.load(Ordering::Relaxed);
+    if current {
+        DEBUG_ACTIVE.store(false, Ordering::Relaxed);
+    } else {
+        DEBUG_ACTIVE.store(true, Ordering::Relaxed);
+        std::thread::spawn(|| {
+            unsafe {
+                let instance = GetModuleHandleW(std::ptr::null());
+                let class_name = to_wide("DebugOverlay");
+                let mut wc: WNDCLASSW = std::mem::zeroed();
+                wc.lpfnWndProc = Some(debug_wnd_proc);
+                wc.hInstance = instance;
+                wc.lpszClassName = class_name.as_ptr();
+                wc.hbrBackground = CreateSolidBrush(0x00000000);
+                RegisterClassW(&wc);
 
-    // --- CHIẾN LƯỢC TIẾT KIỆM CPU ---
+                let x = GetSystemMetrics(SM_XVIRTUALSCREEN);
+                let y = GetSystemMetrics(SM_YVIRTUALSCREEN);
+                let w = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+                let h = GetSystemMetrics(SM_CYVIRTUALSCREEN);
 
-    // BƯỚC 1: Kiểm tra Cache (Cái đã thành công lần trước)
-    // Nếu lần trước kích thước 1.2x đúng, giờ thử nó đầu tiên.
-    {
-        let cached = CACHED_TEMPLATE.lock().unwrap();
-        if let Some(ref cached_img) = *cached {
-            if check_match_at_scale(&haystack, cached_img) {
-                // Reset bộ đếm vì đã tìm thấy
-                SCAN_COUNTER.store(0, Ordering::Relaxed);
-                return true;
+                let hwnd = CreateWindowExW(
+                    WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT,
+                    class_name.as_ptr(), to_wide("DebugRects").as_ptr(), WS_POPUP | WS_VISIBLE,
+                    x, y, w, h, std::ptr::null_mut(), std::ptr::null_mut(), instance, std::ptr::null_mut()
+                );
+
+                SetLayeredWindowAttributes(hwnd, 0x00000000, 0, LWA_COLORKEY);
+                SetTimer(hwnd, 1, 100, None);
+
+                let mut msg: MSG = std::mem::zeroed();
+                while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) != 0 {
+                    TranslateMessage(&msg); DispatchMessageW(&msg);
+                    if msg.message == WM_CLOSE { break; }
+                }
+                UnregisterClassW(class_name.as_ptr(), instance);
             }
-        }
+        });
     }
-
-    // BƯỚC 2: Kiểm tra kích thước gốc (1.0x)
-    // Nếu Cache sai (do game đổi size), thử lại bản gốc.
-    if check_match_at_scale(&haystack, &template_original) {
-        // Nếu bản gốc đúng, lưu vào Cache
-        let mut cached = CACHED_TEMPLATE.lock().unwrap();
-        *cached = Some(template_original);
-        SCAN_COUNTER.store(0, Ordering::Relaxed);
-        return true;
-    }
-
-    // BƯỚC 3: Quét kỹ (Multi-scale) - CHỈ CHẠY KHI CẦN THIẾT
-    // Chỉ chạy mỗi 10 frame (ví dụ: 0.2s một lần) để không nổ máy
-    let counter = SCAN_COUNTER.fetch_add(1, Ordering::Relaxed);
-    if counter % 10 != 0 {
-        return false; // Skip, đợi lượt sau
-    }
-
-    // Các tỷ lệ cần thử: 90%, 110%, 80%, 120%, 130%
-    // Mở rộng tỷ lệ quét từ 50% đến 150% để hỗ trợ màn hình độ phân giải thấp/cao
-    let scales = [
-        1.0,      // Thử kích thước gốc lần nữa cho chắc
-        0.9, 1.1,
-        0.8, 1.2,
-        0.75, 1.25,
-        0.7, 1.3,
-        0.6, 1.4, // Hỗ trợ khi màn hình nhỏ đi nhiều
-        0.5, 1.5  // Hỗ trợ khi màn hình cực nhỏ hoặc cực to
-    ];
-    
-    for scale in scales {
-        let (orig_w, orig_h) = template_original.dimensions();
-        let new_w = (orig_w as f32 * scale) as u32;
-        let new_h = (orig_h as f32 * scale) as u32;
-
-        if new_w < 5 || new_h < 5 { continue; }
-
-        let template_resized = image::imageops::resize(
-            &template_original, 
-            new_w, 
-            new_h, 
-            FilterType::Lanczos3
-        );
-
-        if check_match_at_scale(&haystack, &template_resized) {
-            // TÌM THẤY! Lưu ngay kích thước này vào Cache
-            let mut cached = CACHED_TEMPLATE.lock().unwrap();
-            *cached = Some(template_resized);
-            SCAN_COUNTER.store(0, Ordering::Relaxed);
-            return true;
-        }
-    }
-    
-    // Vẫn không thấy
-    false
 }
 
-// Hàm so khớp logic (Đã tối ưu)
-fn check_match_at_scale(haystack: &RgbaImage, needle: &RgbaImage) -> bool {
-    let (w_h, h_h) = haystack.dimensions();
-    let (w_n, h_n) = needle.dimensions();
+unsafe extern "system" fn debug_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    match msg {
+        WM_TIMER => {
+            if !DEBUG_ACTIVE.load(Ordering::Relaxed) {
+                KillTimer(hwnd, 1);
+                PostMessageW(hwnd, WM_CLOSE, 0, 0);
+            } else {
+                InvalidateRect(hwnd, std::ptr::null(), 0);
+            }
+            0
+        }
+        WM_PAINT => {
+            let mut ps: PAINTSTRUCT = std::mem::zeroed();
+            let hdc = BeginPaint(hwnd, &mut ps);
+            let mut r: RECT = std::mem::zeroed(); GetClientRect(hwnd, &mut r);
 
-    if w_h < w_n || h_h < h_n { return false; }
+            let bg_brush = CreateSolidBrush(0x00000000);
+            FillRect(hdc, &r, bg_brush);
+            DeleteObject(bg_brush as *mut winapi::ctypes::c_void);
 
-    // Tăng dung sai lên chút để dễ bắt hơn
-    // Tăng dung sai màu lên (vì khi scale ảnh bị mờ viền)
-    let color_tolerance = 90; // Cũ là 70
-    // Giảm ngưỡng chính xác xuống một chút
-    let match_threshold = 0.75; // Cũ là 0.80
+            SetBkMode(hdc, TRANSPARENT as i32);
 
-    let limit_x = w_h - w_n;
-    let limit_y = h_h - h_n;
+            let debug_txt = to_wide("DEBUG MODE: ON");
+            SetTextColor(hdc, 0x0000FF00);
+            TextOutW(hdc, 10, 10, debug_txt.as_ptr(), debug_txt.len() as i32);
 
-    // Tối ưu: Chỉ quét vùng trung tâm nếu có thể, nhưng để an toàn cứ quét hết
-    // Tăng bước nhảy (step) khi quét sơ bộ để nhanh hơn
-    for y in (0..=limit_y).step_by(2) {
-        for x in (0..=limit_x).step_by(2) {
-            if quick_check(haystack, needle, x, y, w_n, h_n, color_tolerance) {
-                if fuzzy_match(haystack, needle, x, y, color_tolerance, match_threshold) {
-                    return true;
+            let is_found = ARROW_DEBUG_STATE.load(Ordering::Relaxed);
+            let status_text = if is_found { "MŨI TÊN: TÌM THẤY (FOUND)" } else { "MŨI TÊN: KHÔNG THẤY (MISSING)" };
+            let wide_status = to_wide(status_text);
+            let color = if is_found { 0x0000FF00 } else { 0x000000FF };
+            SetTextColor(hdc, color);
+            TextOutW(hdc, 10, 40, wide_status.as_ptr(), wide_status.len() as i32);
+
+            let cfg = config::Config::load();
+            let vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
+            let vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+
+            let null_brush = winapi::um::wingdi::GetStockObject(winapi::um::wingdi::NULL_BRUSH as i32);
+            let old_brush = SelectObject(hdc, null_brush);
+
+            if !cfg.fixed_regions.is_empty() {
+                let red_pen = CreatePen(PS_SOLID.try_into().unwrap(), 2, 0x000000FF);
+                let old_pen = SelectObject(hdc, red_pen as *mut winapi::ctypes::c_void);
+                for region in &cfg.fixed_regions {
+                    let left = region.x - vx;
+                    let top = region.y - vy;
+                    let right = left + region.width as i32;
+                    let bottom = top + region.height as i32;
+                    winapi::um::wingdi::Rectangle(hdc, left, top, right, bottom);
+                    let txt = to_wide("Vùng Dịch");
+                    SetTextColor(hdc, 0x000000FF);
+                    TextOutW(hdc, left, top - 20, txt.as_ptr(), txt.len() as i32);
+                }
+                SelectObject(hdc, old_pen); DeleteObject(red_pen as *mut winapi::ctypes::c_void);
+            }
+
+            if let Some(arrow) = &cfg.arrow_region {
+                let yellow_pen = CreatePen(PS_SOLID.try_into().unwrap(), 2, 0x0000FFFF);
+                let old_pen = SelectObject(hdc, yellow_pen as *mut winapi::ctypes::c_void);
+                let left = arrow.x - vx;
+                let top = arrow.y - vy;
+                let right = left + arrow.width as i32;
+                let bottom = top + arrow.height as i32;
+                winapi::um::wingdi::Rectangle(hdc, left, top, right, bottom);
+                let txt = to_wide("Mũi Tên");
+                SetTextColor(hdc, 0x0000FFFF);
+                TextOutW(hdc, left, top - 20, txt.as_ptr(), txt.len() as i32);
+                SelectObject(hdc, old_pen); DeleteObject(yellow_pen as *mut winapi::ctypes::c_void);
+            }
+
+            if let Some(instant) = &cfg.instant_region {
+                let blue_pen = CreatePen(PS_SOLID.try_into().unwrap(), 2, 0x00FF0000);
+                let old_pen = SelectObject(hdc, blue_pen as *mut winapi::ctypes::c_void);
+                let left = instant.x - vx;
+                let top = instant.y - vy;
+                let right = left + instant.width as i32;
+                let bottom = top + instant.height as i32;
+                winapi::um::wingdi::Rectangle(hdc, left, top, right, bottom);
+                let txt = to_wide("Dịch Nhanh");
+                SetTextColor(hdc, 0x00FF0000);
+                TextOutW(hdc, left, top - 20, txt.as_ptr(), txt.len() as i32);
+                SelectObject(hdc, old_pen); DeleteObject(blue_pen as *mut winapi::ctypes::c_void);
+            }
+
+            SelectObject(hdc, old_brush);
+            EndPaint(hwnd, &mut ps); 0
+        }
+        WM_DESTROY => { PostQuitMessage(0); 0 }
+        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+pub fn show_selection_overlay() {
+    unsafe {
+        IS_DRAGGING = false;
+        let config = config::Config::load();
+
+        FROZEN_BITMAP = std::ptr::null_mut();
+        if config.freeze_screen {
+            let x = GetSystemMetrics(SM_XVIRTUALSCREEN);
+            let y = GetSystemMetrics(SM_YVIRTUALSCREEN);
+            let w = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+            let h = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+
+            let hdc_screen = GetDC(std::ptr::null_mut());
+            let hdc_mem = CreateCompatibleDC(hdc_screen);
+            let hbm = CreateCompatibleBitmap(hdc_screen, w, h);
+            SelectObject(hdc_mem, hbm as *mut _);
+            BitBlt(hdc_mem, 0, 0, w, h, hdc_screen, x, y, SRCCOPY);
+
+            FROZEN_BITMAP = hbm;
+
+            DeleteDC(hdc_mem);
+            ReleaseDC(std::ptr::null_mut(), hdc_screen);
+        }
+
+        let instance = GetModuleHandleW(std::ptr::null());
+        let class_name = to_wide("SnippingOverlay");
+        let mut wc: WNDCLASSW = std::mem::zeroed();
+        wc.lpfnWndProc = Some(selection_wnd_proc);
+        wc.hInstance = instance;
+        wc.lpszClassName = class_name.as_ptr();
+        wc.hbrBackground = CreateSolidBrush(0x00FF00FF);
+        RegisterClassW(&wc);
+
+        let x = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        let y = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        let w = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+        let h = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+
+        let ex_style = WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW;
+        let hwnd = CreateWindowExW(ex_style, class_name.as_ptr(), to_wide("Snipping").as_ptr(), WS_POPUP, x, y, w, h, std::ptr::null_mut(), std::ptr::null_mut(), instance, std::ptr::null_mut());
+
+        if config.freeze_screen {
+             SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA);
+        } else {
+             SetLayeredWindowAttributes(hwnd, 0x00FF00FF, 100, LWA_ALPHA | LWA_COLORKEY);
+        }
+
+        GetCursorPos(std::ptr::addr_of_mut!(CURR_POS));
+        ShowWindow(hwnd, SW_SHOW);
+
+        let mut msg: MSG = std::mem::zeroed();
+        while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) != 0 {
+            TranslateMessage(&msg); DispatchMessageW(&msg);
+            if msg.message == WM_CLOSE { break; }
+        }
+
+        if !FROZEN_BITMAP.is_null() {
+            DeleteObject(FROZEN_BITMAP as *mut _);
+            FROZEN_BITMAP = std::ptr::null_mut();
+        }
+
+        UnregisterClassW(class_name.as_ptr(), instance);
+    }
+}
+
+unsafe extern "system" fn selection_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    match msg {
+        WM_KEYDOWN => { if wparam == VK_ESCAPE as usize { PostMessageW(hwnd, WM_CLOSE, 0, 0); } 0 }
+        WM_LBUTTONDOWN => {
+            IS_DRAGGING = true; GetCursorPos(std::ptr::addr_of_mut!(START_POS)); CURR_POS = START_POS;
+            SetCapture(hwnd); InvalidateRect(hwnd, std::ptr::null(), 0);
+            UpdateWindow(hwnd);
+            0
+        }
+        WM_MOUSEMOVE => {
+            GetCursorPos(std::ptr::addr_of_mut!(CURR_POS));
+            InvalidateRect(hwnd, std::ptr::null(), 0);
+            UpdateWindow(hwnd);
+            0
+        }
+        WM_LBUTTONUP => {
+            if IS_DRAGGING {
+                IS_DRAGGING = false; ReleaseCapture();
+                let rect = RECT { left: START_POS.x.min(CURR_POS.x), top: START_POS.y.min(CURR_POS.y), right: START_POS.x.max(CURR_POS.x), bottom: START_POS.y.max(CURR_POS.y) };
+                if (rect.right - rect.left) > 10 && (rect.bottom - rect.top) > 10 {
+                    let region = config::Region { x: rect.left, y: rect.top, width: (rect.right - rect.left) as u32, height: (rect.bottom - rect.top) as u32 };
+                    let hwnd_usize = hwnd as usize;
+                    std::thread::spawn(move || { process_region(region); unsafe { PostMessageW(hwnd_usize as HWND, WM_CLOSE, 0, 0); } });
+                } else { PostMessageW(hwnd, WM_CLOSE, 0, 0); }
+            } 0
+        }
+        WM_SETCURSOR => {
+            let mode = SELECTION_MODE.load(Ordering::Relaxed);
+            if mode == 2 {
+                SetCursor(LoadCursorW(std::ptr::null_mut(), IDC_ARROW));
+            } else {
+                SetCursor(std::ptr::null_mut());
+            }
+            1
+        }
+        WM_PAINT => {
+            let mut ps: PAINTSTRUCT = std::mem::zeroed();
+            let hdc = BeginPaint(hwnd, &mut ps);
+            let mem_dc = CreateCompatibleDC(hdc);
+            let w = GetSystemMetrics(SM_CXVIRTUALSCREEN); let h = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+            let vx = GetSystemMetrics(SM_XVIRTUALSCREEN); let vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+
+            let mem_bm = CreateCompatibleBitmap(hdc, w, h); SelectObject(mem_dc, mem_bm as *mut winapi::ctypes::c_void);
+            let mode = SELECTION_MODE.load(Ordering::Relaxed);
+
+            if !FROZEN_BITMAP.is_null() {
+                // === FREEZE MODE ===
+                let hdc_src = CreateCompatibleDC(hdc);
+                SelectObject(hdc_src, FROZEN_BITMAP as *mut _);
+
+                // 1. Draw source
+                BitBlt(mem_dc, 0, 0, w, h, hdc_src, 0, 0, SRCCOPY);
+
+                // 2. Dim screen
+                let dim_brush = CreateSolidBrush(0x00404040);
+                let old_brush = SelectObject(mem_dc, dim_brush as *mut _);
+                PatBlt(mem_dc, 0, 0, w, h, SRCAND);
+                SelectObject(mem_dc, old_brush);
+                DeleteObject(dim_brush as *mut _);
+
+                // 3. Border
+                let pen_screen_border = CreatePen(PS_INSIDEFRAME as i32, 6, 0x00FF0000); // Blue (BGR)
+                let old_pen_border = SelectObject(mem_dc, pen_screen_border as *mut _);
+                let null_brush = winapi::um::wingdi::GetStockObject(winapi::um::wingdi::NULL_BRUSH as i32);
+                let old_br_border = SelectObject(mem_dc, null_brush);
+                winapi::um::wingdi::Rectangle(mem_dc, 0, 0, w, h);
+                SelectObject(mem_dc, old_br_border);
+                SelectObject(mem_dc, old_pen_border);
+                DeleteObject(pen_screen_border as *mut _);
+
+                // 4. Dragging rect
+                if IS_DRAGGING {
+                     let r = RECT {
+                        left: (START_POS.x.min(CURR_POS.x)) - vx,
+                        top: (START_POS.y.min(CURR_POS.y)) - vy,
+                        right: (START_POS.x.max(CURR_POS.x)) - vx,
+                        bottom: (START_POS.y.max(CURR_POS.y)) - vy
+                    };
+
+                    // Copy bright part from src
+                    BitBlt(mem_dc, r.left, r.top, r.right - r.left, r.bottom - r.top,
+                           hdc_src, r.left, r.top, SRCCOPY);
+
+                    let color = if mode == 1 { 0x00FFFF00 } else if mode == 2 { 0x000080FF } else { 0x00FF00FF };
+                    let pen_border = CreatePen(PS_SOLID.try_into().unwrap(), 2, color);
+                    let old_pen = SelectObject(mem_dc, pen_border as *mut _);
+                    let old_br = SelectObject(mem_dc, null_brush);
+
+                    winapi::um::wingdi::Rectangle(mem_dc, r.left, r.top, r.right, r.bottom);
+
+                    SelectObject(mem_dc, old_br);
+                    SelectObject(mem_dc, old_pen);
+                    DeleteObject(pen_border as *mut _);
+                }
+
+                DeleteDC(hdc_src);
+
+            } else {
+                // === NORMAL MODE ===
+                let bg_brush = CreateSolidBrush(0x00000000);
+                FillRect(mem_dc, &RECT{left:0,top:0,right:w,bottom:h}, bg_brush);
+                DeleteObject(bg_brush as *mut winapi::ctypes::c_void);
+
+                if IS_DRAGGING {
+                    let r = RECT {
+                        left: (START_POS.x.min(CURR_POS.x)) - vx,
+                        top: (START_POS.y.min(CURR_POS.y)) - vy,
+                        right: (START_POS.x.max(CURR_POS.x)) - vx,
+                        bottom: (START_POS.y.max(CURR_POS.y)) - vy
+                    };
+
+                    let color = if mode == 1 { 0x00FFFF00 } else if mode == 2 { 0x000080FF } else { 0x00FF00FF };
+                    let k_br = CreateSolidBrush(color);
+                    FillRect(mem_dc, &r, k_br);
+                    DeleteObject(k_br as *mut winapi::ctypes::c_void);
+
+                    let b_br = CreateSolidBrush(0x00FFFFFF); FrameRect(mem_dc, &r, b_br); DeleteObject(b_br as *mut winapi::ctypes::c_void);
                 }
             }
+
+            if mode != 2 {
+                let cx = CURR_POS.x - vx;
+                let cy = CURR_POS.y - vy;
+                let pen = CreatePen(PS_SOLID.try_into().unwrap(), 2, 0x000000FF);
+                let old_pen = SelectObject(mem_dc, pen as *mut winapi::ctypes::c_void);
+                MoveToEx(mem_dc, 0, cy, std::ptr::null_mut()); LineTo(mem_dc, w, cy);
+                MoveToEx(mem_dc, cx, 0, std::ptr::null_mut()); LineTo(mem_dc, cx, h);
+                SelectObject(mem_dc, old_pen); DeleteObject(pen as *mut winapi::ctypes::c_void);
+            }
+
+            BitBlt(hdc, 0, 0, w, h, mem_dc, 0, 0, SRCCOPY);
+            DeleteObject(mem_bm as *mut winapi::ctypes::c_void); DeleteDC(mem_dc); EndPaint(hwnd, &mut ps); 0
+        }
+        WM_DESTROY => { PostQuitMessage(0); 0 }
+        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+fn process_region(region: config::Region) {
+    let mut config = config::Config::load();
+    let mode = SELECTION_MODE.load(Ordering::Relaxed);
+
+    if mode == 0 {
+        config.fixed_regions.clear();
+        config.fixed_regions.push(region);
+    } else if mode == 1 {
+        config.arrow_region = Some(region);
+    } else if mode == 2 {
+        config.instant_region = Some(region);
+    } else if mode >= 100 {
+        let idx = (mode - 100) as usize;
+        if idx < config.aux_regions.len() {
+            config.aux_regions[idx].region = Some(region);
         }
     }
-    false
+    config.save().unwrap();
 }
 
-fn quick_check(haystack: &RgbaImage, needle: &RgbaImage, sx: u32, sy: u32, w: u32, h: u32, tol: i16) -> bool {
-    let cx = w / 2;
-    let cy = h / 2;
-    let p_n = needle.get_pixel(cx, cy);
-    if p_n[3] < 10 { return true; }
-    let p_h = haystack.get_pixel(sx + cx, sy + cy);
-    pixel_diff(p_h, p_n) <= tol
+pub fn show_highlight(rect: RECT) {
+    std::thread::spawn(move || {
+        unsafe {
+            let instance = GetModuleHandleW(std::ptr::null());
+            let class_name = to_wide("HighlightOverlay");
+            let mut wc: WNDCLASSW = std::mem::zeroed();
+            wc.lpfnWndProc = Some(highlight_wnd_proc);
+            wc.hInstance = instance;
+            wc.lpszClassName = class_name.as_ptr();
+            wc.hbrBackground = CreateSolidBrush(0x0000FF00);
+            RegisterClassW(&wc);
+
+            let hwnd = CreateWindowExW(
+                WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+                class_name.as_ptr(), to_wide("Highlight").as_ptr(), WS_POPUP | WS_VISIBLE,
+                rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top,
+                std::ptr::null_mut(), std::ptr::null_mut(), instance, std::ptr::null_mut()
+            );
+
+            SetLayeredWindowAttributes(hwnd, 0, 100, 0x00000002);
+            SetTimer(hwnd, 999, 3000, None);
+
+            let mut msg: MSG = std::mem::zeroed();
+            while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) != 0 {
+                TranslateMessage(&msg); DispatchMessageW(&msg);
+                if msg.message == WM_CLOSE { break; }
+            }
+            UnregisterClassW(class_name.as_ptr(), instance);
+        }
+    });
 }
 
-fn fuzzy_match(haystack: &RgbaImage, needle: &RgbaImage, sx: u32, sy: u32, tol: i16, threshold: f32) -> bool {
-    let (w, h) = needle.dimensions();
-    let mut total_checked = 0;
-    let mut matched_count = 0;
+static REGISTER_RESULT_CLASS: Once = Once::new();
+pub fn show_loading_window(rect: RECT) {
+    show_result_window_internal(rect, "...".to_string(), 20000, true);
+}
 
-    // Bước nhảy 2: Giảm 4 lần lượng tính toán
-    for y in (0..h).step_by(2) {
-        for x in (0..w).step_by(2) {
-            let p_n = needle.get_pixel(x, y);
-            if p_n[3] < 20 { continue; } // Bỏ qua pixel trong suốt
-            
-            total_checked += 1;
-            let p_h = haystack.get_pixel(sx + x, sy + y);
-            
-            if pixel_diff(p_h, p_n) <= tol { 
-                matched_count += 1; 
+// --- HÀM MỚI: Cập nhật nội dung cửa sổ "Loading" ---
+pub fn update_loading_window(text: String) -> bool { // Thêm -> bool
+    let hwnd_val = PENDING_LOADING_HWND.load(Ordering::Relaxed);
+    if hwnd_val == 0 { return false; } // Trả về false
+    let hwnd = hwnd_val as HWND;
+    if unsafe { IsWindow(hwnd) } == 0 { return false; } // Trả về false
+
+    unsafe {
+        // Reset thời gian tắt (vì đã có kết quả)
+        SetTimer(hwnd, 1, 20000, None); // Ví dụ: 20s để đọc
+
+        // Tính lại chiều cao mới
+        let hdc = GetDC(hwnd);
+        let font_size = CURRENT_FONT_SIZE.load(Ordering::Relaxed);
+        let hfont = CreateFontW(font_size, 0, 0, 0, 400, 0, 0, 0, 0, 0, 0, 2, 0, to_wide("Roboto").as_ptr());
+        SelectObject(hdc, hfont as *mut winapi::ctypes::c_void);
+
+        let mut rect: RECT = std::mem::zeroed();
+        GetWindowRect(hwnd, &mut rect);
+        let width = rect.right - rect.left;
+        let padding = 10;
+        let max_text_width = width - padding * 2;
+
+        let mut text_rect = RECT { left: 0, top: 0, right: max_text_width, bottom: 0 };
+        let wide_text = to_wide(&text);
+        DrawTextW(hdc, wide_text.as_ptr(), -1, &mut text_rect, DT_CALCRECT | DT_WORDBREAK);
+        let new_height = (text_rect.bottom - text_rect.top) + padding * 2;
+
+        DeleteObject(hfont as *mut winapi::ctypes::c_void);
+        ReleaseDC(hwnd, hdc);
+
+        // Cập nhật text & Resize
+        SetWindowTextW(hwnd, wide_text.as_ptr());
+        MoveWindow(hwnd, rect.left, rect.top, width, new_height, 1);
+        InvalidateRect(hwnd, std::ptr::null(), TRUE);
+
+        // Reset cờ chờ
+        PENDING_LOADING_HWND.store(0, Ordering::Relaxed);
+    }
+    true // Trả về true
+}
+
+// --- HÀM CHUNG ---
+fn show_result_window_internal(target_rect: RECT, text: String, duration_ms: u32, is_loading: bool) {
+    unsafe {
+        let instance = GetModuleHandleW(std::ptr::null());
+        let class_name = to_wide("TranslationResult");
+        REGISTER_RESULT_CLASS.call_once(|| {
+            let mut wc: WNDCLASSW = std::mem::zeroed();
+            wc.lpfnWndProc = Some(result_wnd_proc);
+            wc.hInstance = instance;
+            wc.lpszClassName = class_name.as_ptr();
+            wc.hbrBackground = CreateSolidBrush(0x00FF00FF);
+            wc.style = winapi::um::winuser::CS_HREDRAW | winapi::um::winuser::CS_VREDRAW;
+            RegisterClassW(&wc);
+        });
+
+        let region_width = (target_rect.right - target_rect.left).abs();
+        let hdc_screen = GetDC(std::ptr::null_mut());
+
+        let font_size = CURRENT_FONT_SIZE.load(Ordering::Relaxed);
+        let hfont = CreateFontW(font_size, 0, 0, 0, 400, 0, 0, 0, 0, 0, 0, 2, 0, to_wide("Roboto").as_ptr());
+
+        SelectObject(hdc_screen, hfont as *mut winapi::ctypes::c_void);
+        let padding = 10; let max_text_width = region_width - padding * 2;
+        let mut text_rect = RECT { left: 0, top: 0, right: max_text_width, bottom: 0 };
+        let wide_text = to_wide(&text);
+        DrawTextW(hdc_screen, wide_text.as_ptr(), -1, &mut text_rect, DT_CALCRECT | DT_WORDBREAK);
+        let text_height = text_rect.bottom - text_rect.top;
+        DeleteObject(hfont as *mut winapi::ctypes::c_void);
+        ReleaseDC(std::ptr::null_mut(), hdc_screen);
+
+        let height = text_height + padding * 2;
+        let x = target_rect.left;
+        let width = region_width as i32;
+        let mut y = target_rect.top - height - 10;
+        if y < 0 { y = target_rect.top + 10; } // Fallback nếu sát mép trên
+
+        // --- PUSH UP LOGIC (ĐẨY CÁC CỬA SỔ CŨ LÊN) ---
+        let valid_hwnds: Vec<HWND> = {
+            let mut list = OVERLAY_LIST.lock().unwrap();
+            list.retain(|&h| IsWindow(h as HWND) != 0);
+            list.iter().map(|&h| h as HWND).collect()
+        };
+        for hwnd in valid_hwnds {
+            let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+            if GetWindowRect(hwnd, &mut r) != 0 {
+                // Đẩy lên đúng bằng chiều cao cửa sổ mới + khoảng cách
+                MoveWindow(hwnd, r.left, r.top - height - 10, r.right - r.left, r.bottom - r.top, 1);
+            }
+        }
+        // ---------------------------------------------
+
+        let font_data = include_bytes!("roboto.ttf");
+        let _ = AddFontMemResourceEx(font_data.as_ptr() as *mut winapi::ctypes::c_void, font_data.len() as u32, std::ptr::null_mut(), &mut 0);
+
+        let hwnd = CreateWindowExW(
+            WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+            class_name.as_ptr(), to_wide(&text).as_ptr(), WS_POPUP | WS_VISIBLE, x, y, width, height, std::ptr::null_mut(), std::ptr::null_mut(), instance, std::ptr::null_mut());
+
+        if !hwnd.is_null() {
+            {
+                let mut list = OVERLAY_LIST.lock().unwrap();
+                list.push(hwnd as usize);
+            }
+
+            // Nếu là cửa sổ Loading, lưu lại Handle để cập nhật sau
+            if is_loading {
+                PENDING_LOADING_HWND.store(hwnd as usize, Ordering::Relaxed);
+            }
+
+            SetLayeredWindowAttributes(hwnd, 0x00FF00FF, 200, LWA_ALPHA | LWA_COLORKEY);
+            SetTimer(hwnd, 1, duration_ms, None);
+
+            let mut msg: MSG = std::mem::zeroed();
+            while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) != 0 {
+                TranslateMessage(&msg); DispatchMessageW(&msg);
+                if msg.message == WM_CLOSE { break; }
             }
         }
     }
-
-    if total_checked == 0 { return true; }
-    (matched_count as f32 / total_checked as f32) >= threshold
 }
 
-fn pixel_diff(p1: &image::Rgba<u8>, p2: &image::Rgba<u8>) -> i16 {
-    let r = (p1[0] as i16 - p2[0] as i16).abs();
-    let g = (p1[1] as i16 - p2[1] as i16).abs();
-    let b = (p1[2] as i16 - p2[2] as i16).abs();
-    r.max(g).max(b)
+pub fn show_result_window(target_rect: RECT, text: String, duration_ms: u32) {
+    show_result_window_internal(target_rect, text, duration_ms, false);
+}
+
+unsafe extern "system" fn highlight_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    match msg {
+        WM_PAINT => {
+            let mut ps: PAINTSTRUCT = std::mem::zeroed();
+            let hdc = BeginPaint(hwnd, &mut ps);
+            let mut r: RECT = std::mem::zeroed(); GetClientRect(hwnd, &mut r);
+
+            let fill_brush = CreateSolidBrush(0x0000FF00);
+            FillRect(hdc, &r, fill_brush);
+            DeleteObject(fill_brush as *mut winapi::ctypes::c_void);
+
+            let border_brush = CreateSolidBrush(0x000000FF);
+            FrameRect(hdc, &r, border_brush);
+            let mut r2 = r; r2.left += 1; r2.top += 1; r2.right -= 1; r2.bottom -= 1;
+            FrameRect(hdc, &r2, border_brush);
+            let mut r3 = r2; r3.left += 1; r3.top += 1; r3.right -= 1; r3.bottom -= 1;
+            FrameRect(hdc, &r3, border_brush);
+
+            DeleteObject(border_brush as *mut winapi::ctypes::c_void);
+            EndPaint(hwnd, &mut ps); 0
+        }
+        WM_TIMER => { if wparam == 999 { KillTimer(hwnd, 999); PostMessageW(hwnd, WM_CLOSE, 0, 0); } 0 }
+        WM_DESTROY => { PostQuitMessage(0); 0 }
+        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+
+unsafe extern "system" fn result_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    match msg {
+        WM_PAINT => {
+            let mut ps: PAINTSTRUCT = std::mem::zeroed();
+            let hdc = BeginPaint(hwnd, &mut ps);
+            let mut rect: RECT = std::mem::zeroed(); GetClientRect(hwnd, &mut rect);
+            let mem_dc = CreateCompatibleDC(hdc); let mem_bm = CreateCompatibleBitmap(hdc, rect.right, rect.bottom); SelectObject(mem_dc, mem_bm as *mut winapi::ctypes::c_void);
+            let k_br = CreateSolidBrush(0x00FF00FF); FillRect(mem_dc, &rect, k_br); DeleteObject(k_br as *mut winapi::ctypes::c_void);
+
+            // Vẽ nền đen mờ
+            let hrgn = CreateRoundRectRgn(0, 0, rect.right, rect.bottom, 8, 8); let bg_br = CreateSolidBrush(0x00000000); FillRgn(mem_dc, hrgn, bg_br); DeleteObject(bg_br as *mut winapi::ctypes::c_void);
+            { let map_mutex = HOVER_MAP.get_or_init(|| Mutex::new(HashMap::new())); let map = map_mutex.lock().unwrap(); if *map.get(&(hwnd as usize)).unwrap_or(&false) { let g_br = CreateSolidBrush(0x0000FF00); FrameRgn(mem_dc, hrgn, g_br, 2, 2); DeleteObject(g_br as *mut winapi::ctypes::c_void); } }
+            SetBkMode(mem_dc, 1); SetTextColor(mem_dc, 0x00FFFFFF);
+            let font_size = CURRENT_FONT_SIZE.load(Ordering::Relaxed);
+            let hfont = CreateFontW(font_size, 0, 0, 0, 400, 0, 0, 0, 0, 0, 0, 2, 0, to_wide("Roboto").as_ptr());
+            let old_font = SelectObject(mem_dc, hfont as *mut winapi::ctypes::c_void);
+            let len = GetWindowTextLengthW(hwnd) + 1; let mut buf = vec![0u16; len as usize]; GetWindowTextW(hwnd, buf.as_mut_ptr(), len); let v_len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+            let lines = break_text_into_lines(mem_dc, &buf[0..v_len], (rect.right - rect.left) - 20); let mut sz: SIZE = std::mem::zeroed(); GetTextExtentPoint32W(mem_dc, to_wide("A").as_ptr(), 1, &mut sz); let start_y = (rect.bottom - rect.top - (sz.cy * lines.len() as i32)) / 2;
+            for (i, line) in lines.iter().enumerate() { let y = start_y + (i as i32 * sz.cy); if i < lines.len() - 1 && line.spaces > 0 { SetTextJustification(mem_dc, ((rect.right - rect.left) - 20) - line.width, line.spaces as i32); TextOutW(mem_dc, 10, y, line.text.as_ptr(), line.text.len() as i32); SetTextJustification(mem_dc, 0, 0); } else { TextOutW(mem_dc, (rect.right - rect.left - line.width) / 2, y, line.text.as_ptr(), line.text.len() as i32); } }
+            SelectObject(mem_dc, old_font); DeleteObject(hfont as *mut winapi::ctypes::c_void); DeleteObject(hrgn as *mut winapi::ctypes::c_void);
+
+            BitBlt(hdc, 0, 0, rect.right, rect.bottom, mem_dc, 0, 0, SRCCOPY); DeleteObject(mem_bm as *mut winapi::ctypes::c_void); DeleteDC(mem_dc); EndPaint(hwnd, &mut ps); 0
+        }
+        WM_LBUTTONUP => {
+            // Dừng đọc
+            crate::tts::stop();
+            // Gửi lệnh đóng cửa sổ ngay lập tức
+            PostMessageW(hwnd, WM_CLOSE, 0, 0);
+            0
+        }
+        WM_TIMER => { if wparam == 1 { KillTimer(hwnd, 1); PostMessageW(hwnd, WM_CLOSE, 0, 0); } else if wparam == 3 { let mut close = false; { let map_mutex = ANIMATION_MAP.get_or_init(|| Mutex::new(HashMap::new())); let mut map = map_mutex.lock().unwrap(); if let Some(p) = map.get_mut(&(hwnd as usize)) { let mut cnt = 0; let mut r = RECT{left:0,top:0,right:0,bottom:0}; GetClientRect(hwnd, &mut r); for i in p.iter_mut() { i.x+=i.vx; i.y+=i.vy; i.vy+=0.5; if i.y < (r.bottom+100) as f32 { cnt+=1; } } if cnt == 0 { close = true; } } else { close = true; } } if close { KillTimer(hwnd, 3); PostMessageW(hwnd, WM_CLOSE, 0, 0); } else { InvalidateRect(hwnd, std::ptr::null(), 0); } } 0 }
+        WM_DESTROY => { { let mut map = HOVER_MAP.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap(); map.remove(&(hwnd as usize)); } { let mut map = ANIMATION_MAP.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap(); map.remove(&(hwnd as usize)); } { let mut list = OVERLAY_LIST.lock().unwrap(); list.retain(|&h| h != hwnd as usize); } PostQuitMessage(0); 0 }
+        WM_KEYDOWN => { if wparam == VK_ESCAPE as usize { PostMessageW(hwnd, WM_CLOSE, 0, 0); } 0 }
+        WM_SETCURSOR => { SetCursor(LoadCursorW(std::ptr::null_mut(), IDC_HAND)); 1 }
+        WM_MOUSEMOVE => { let anim = { ANIMATION_MAP.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap().contains_key(&(hwnd as usize)) }; if !anim { let map_mutex = HOVER_MAP.get_or_init(|| Mutex::new(HashMap::new())); let mut map = map_mutex.lock().unwrap(); if !*map.get(&(hwnd as usize)).unwrap_or(&false) { map.insert(hwnd as usize, true); let mut t = TRACKMOUSEEVENT{cbSize:std::mem::size_of::<TRACKMOUSEEVENT>() as u32, dwFlags:TME_LEAVE, hwndTrack:hwnd, dwHoverTime:0}; unsafe { TrackMouseEvent(&mut t); InvalidateRect(hwnd, std::ptr::null(), 0); } } } 0 }
+        WM_MOUSELEAVE => { let anim = { ANIMATION_MAP.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap().contains_key(&(hwnd as usize)) }; if !anim { HOVER_MAP.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap().insert(hwnd as usize, false); unsafe { InvalidateRect(hwnd, std::ptr::null(), 0); } } 0 }
+        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
 }
 </file>
 
@@ -1408,7 +1151,7 @@ pub struct Region {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct CustomPrompt {
-    pub content: String, 
+    pub content: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -1429,10 +1172,10 @@ pub struct Config {
     pub active_groq_index: usize,
 
     pub current_prompt: String,
-    
+
     #[serde(default)]
     pub saved_prompts: Vec<CustomPrompt>,
-    
+
     pub hotkey_translate: String,
     pub hotkey_select: String,
     pub hotkey_instant: String,
@@ -1441,7 +1184,7 @@ pub struct Config {
     pub split_tts: bool,
     pub use_tts: bool,
     pub show_overlay: bool,
-    
+
     pub fixed_regions: Vec<Region>,
     pub arrow_region: Option<Region>,
     pub instant_region: Option<Region>,
@@ -1459,7 +1202,6 @@ pub struct Config {
     #[serde(default)]
     pub copy_instant_only: bool,
 
-    // --- THÊM DÒNG NÀY ---
     #[serde(default)]
     pub copy_original: bool,
 
@@ -1473,7 +1215,9 @@ pub struct Config {
     pub freeze_screen: bool,
 }
 
-fn default_interval() -> f32 { 0.02 }
+// --- SỬA Ở ĐÂY: Mặc định là 0.1 giây ---
+fn default_interval() -> f32 { 0.1 }
+// ---------------------------------------
 fn default_font_size() -> i32 { 24 }
 fn default_dark_mode() -> bool { false }
 
@@ -1499,10 +1243,10 @@ impl Default for Config {
             instant_region: None,
             aux_regions: Vec::new(),
             selected_api: "groq".to_string(),
-            arrow_check_interval: 0.02,
+            // Đảm bảo load mặc định cũng là 0.1
+            arrow_check_interval: 0.1,
             auto_copy: false,
             copy_instant_only: false,
-            // --- THÊM DÒNG NÀY ---
             copy_original: false,
             overlay_font_size: 24,
             is_dark_mode: false,
@@ -1584,7 +1328,7 @@ impl Config {
         fs::write(path, content)?;
         Ok(())
     }
-    
+
     pub fn get_current_groq_key(&self) -> String {
         if self.groq_api_keys.is_empty() { return String::new(); }
         if self.active_groq_index < self.groq_api_keys.len() { self.groq_api_keys[self.active_groq_index].clone() }
@@ -1593,7 +1337,203 @@ impl Config {
 }
 </file>
 
+<file path="src/capture.rs">
+use image::{DynamicImage, ImageFormat, imageops::FilterType, RgbaImage};
+use screenshots::Screen;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU8, Ordering};
+
+// Biến toàn cục để lưu lại "kích thước mũi tên đúng nhất"
+static CACHED_TEMPLATE: Mutex<Option<RgbaImage>> = Mutex::new(None);
+
+// Bộ đếm để hạn chế tần suất quét kỹ
+static SCAN_COUNTER: AtomicU8 = AtomicU8::new(0);
+
+/// Tìm màn hình chứa điểm (x, y)
+fn find_screen_containing(x: i32, y: i32, screens: &[Screen]) -> Option<&Screen> {
+    screens.iter().find(|s| {
+        let info = s.display_info;
+        x >= info.x
+        && x < info.x + info.width as i32
+        && y >= info.y
+        && y < info.y + info.height as i32
+    })
+}
+
+pub fn capture_image(region: &crate::config::Region) -> Result<Vec<u8>, anyhow::Error> {
+    let screens = Screen::all()?;
+    if screens.is_empty() { return Err(anyhow::anyhow!("No screens found")); }
+
+    let screen = find_screen_containing(region.x, region.y, &screens)
+        .unwrap_or(&screens[0]);
+
+    let relative_x = region.x - screen.display_info.x;
+    let relative_y = region.y - screen.display_info.y;
+
+    let image = screen.capture_area(relative_x, relative_y, region.width, region.height)?;
+    let img = DynamicImage::ImageRgba8(image);
+    let mut buffer = Vec::new();
+    img.write_to(&mut std::io::Cursor::new(&mut buffer), ImageFormat::Png)?;
+    Ok(buffer)
+}
+
+pub fn is_template_present(region: &crate::config::Region, template_bytes: &[u8]) -> bool {
+    let screens = match Screen::all() {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    if screens.is_empty() { return false; }
+
+    let screen = find_screen_containing(region.x, region.y, &screens)
+        .unwrap_or(&screens[0]);
+
+    let relative_x = region.x - screen.display_info.x;
+    let relative_y = region.y - screen.display_info.y;
+
+    let captured_image = match screen.capture_area(relative_x, relative_y, region.width, region.height) {
+        Ok(img) => DynamicImage::ImageRgba8(img),
+        Err(_) => return false,
+    };
+
+    let haystack = captured_image.to_rgba8();
+
+    let template_original = match image::load_from_memory(template_bytes) {
+        Ok(img) => img.to_rgba8(),
+        Err(_) => return false,
+    };
+
+    // --- CHIẾN LƯỢC QUÉT ---
+
+    // 1. Kiểm tra Cache trước
+    {
+        let cached = CACHED_TEMPLATE.lock().unwrap();
+        if let Some(ref cached_img) = *cached {
+            if check_match_at_scale(&haystack, cached_img) {
+                SCAN_COUNTER.store(0, Ordering::Relaxed);
+                return true;
+            }
+        }
+    }
+
+    // 2. Kiểm tra ảnh gốc
+    if check_match_at_scale(&haystack, &template_original) {
+        let mut cached = CACHED_TEMPLATE.lock().unwrap();
+        *cached = Some(template_original);
+        SCAN_COUNTER.store(0, Ordering::Relaxed);
+        return true;
+    }
+
+    // 3. Quét đa tỉ lệ (Chạy mỗi 5 frame)
+    let counter = SCAN_COUNTER.fetch_add(1, Ordering::Relaxed);
+    if counter % 5 != 0 {
+        return false;
+    }
+
+    // Mở rộng dải scale một chút để dễ bắt hơn, nhưng vẫn tránh mức 0.5 (quá nhỏ)
+    let scales = [
+        1.0,
+        0.95, 1.05,
+        0.9, 1.1,
+        0.8, 1.2,
+        0.75, 1.25,
+        0.7, 1.3
+    ];
+
+    for scale in scales {
+        let (orig_w, orig_h) = template_original.dimensions();
+        let new_w = (orig_w as f32 * scale) as u32;
+        let new_h = (orig_h as f32 * scale) as u32;
+
+        if new_w < 5 || new_h < 5 { continue; }
+
+        let template_resized = image::imageops::resize(
+            &template_original,
+            new_w,
+            new_h,
+            FilterType::Lanczos3
+        );
+
+        if check_match_at_scale(&haystack, &template_resized) {
+            let mut cached = CACHED_TEMPLATE.lock().unwrap();
+            *cached = Some(template_resized);
+            SCAN_COUNTER.store(0, Ordering::Relaxed);
+            return true;
+        }
+    }
+
+    false
+}
+
+fn check_match_at_scale(haystack: &RgbaImage, needle: &RgbaImage) -> bool {
+    let (w_h, h_h) = haystack.dimensions();
+    let (w_n, h_n) = needle.dimensions();
+
+    if w_h < w_n || h_h < h_n { return false; }
+
+    // --- CẤU HÌNH ĐỘ DỄ TÍNH ---
+
+    // Color Tolerance: Tăng lên 80 (Rất cao)
+    // Cho phép mũi tên màu trắng bị mờ xuống màu xám đậm vẫn nhận ra.
+    let color_tolerance = 80;
+
+    // Match Threshold: Giảm xuống 0.70 (70%)
+    // Chỉ cần khớp 70% diện tích là được.
+    let match_threshold = 0.70;
+
+    let limit_x = w_h - w_n;
+    let limit_y = h_h - h_n;
+
+    // Quét qua haystack (Nhảy bước 2 pixel để tìm nhanh)
+    for y in (0..=limit_y).step_by(2) {
+        for x in (0..=limit_x).step_by(2) {
+            if fuzzy_match(haystack, needle, x, y, color_tolerance, match_threshold) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn fuzzy_match(haystack: &RgbaImage, needle: &RgbaImage, sx: u32, sy: u32, tol: i16, threshold: f32) -> bool {
+    let (w, h) = needle.dimensions();
+    let mut total_checked = 0;
+    let mut matched_count = 0;
+
+    // Quét từng pixel của mũi tên mẫu
+    for y in 0..h {
+        for x in 0..w {
+            let p_n = needle.get_pixel(x, y);
+
+            // Chỉ kiểm tra những điểm thực sự là mũi tên (Alpha > 50)
+            if p_n[3] < 50 { continue; }
+
+            total_checked += 1;
+            let p_h = haystack.get_pixel(sx + x, sy + y);
+
+            if pixel_diff(p_h, p_n) <= tol {
+                matched_count += 1;
+            }
+        }
+    }
+
+    if total_checked == 0 { return true; }
+
+    // Tính tỉ lệ khớp
+    (matched_count as f32 / total_checked as f32) >= threshold
+}
+
+fn pixel_diff(p1: &image::Rgba<u8>, p2: &image::Rgba<u8>) -> i16 {
+    let r = (p1[0] as i16 - p2[0] as i16).abs();
+    let g = (p1[1] as i16 - p2[1] as i16).abs();
+    let b = (p1[2] as i16 - p2[2] as i16).abs();
+
+    // Dùng trung bình cộng thay vì max để dễ tính hơn với các điểm nhiễu
+    (r + g + b) / 3
+}
+</file>
+
 <file path="src/ui.rs">
+// ... (Giữ nguyên các phần import ở đầu file)
 use crate::config;
 use crate::overlay;
 use eframe::egui;
@@ -1641,49 +1581,32 @@ use webbrowser;
 use std::fs;
 use rfd;
 
-// Helper: Chuyển chuỗi sang wide string
+// ... (Giữ nguyên các hàm helper to_wide, get_game_bounds, show_alert, ReaderState, UiState...)
 fn to_wide(s: &str) -> Vec<u16> {
     OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
 }
 
-// Helper: Lấy tọa độ Client của cửa sổ Game
 fn get_game_bounds(window_title: &str) -> Option<(i32, i32, u32, u32)> {
     unsafe {
         let wide_title = to_wide(window_title);
-        // Tìm cửa sổ theo tên (Class để null)
         let hwnd = FindWindowW(std::ptr::null(), wide_title.as_ptr());
-
-        if hwnd.is_null() || IsWindowVisible(hwnd) == 0 {
-            return None;
-        }
-
+        if hwnd.is_null() || IsWindowVisible(hwnd) == 0 { return None; }
         let mut rect: RECT = std::mem::zeroed();
-        // Lấy kích thước vùng nội dung (bỏ thanh tiêu đề)
-        if GetClientRect(hwnd, &mut rect) == 0 {
-            return None;
-        }
-
-        // Chuyển đổi điểm (0,0) của vùng nội dung sang tọa độ màn hình
+        if GetClientRect(hwnd, &mut rect) == 0 { return None; }
         let mut point = POINT { x: 0, y: 0 };
-        if ClientToScreen(hwnd, &mut point) == 0 {
-            return None;
-        }
-
+        if ClientToScreen(hwnd, &mut point) == 0 { return None; }
         let width = (rect.right - rect.left) as u32;
         let height = (rect.bottom - rect.top) as u32;
-
         Some((point.x, point.y, width, height))
     }
 }
 
-// Helper: Hiện thông báo lỗi (Chạy thread riêng + TopMost để không bị che)
 fn show_alert(message: &str) {
     let msg = message.to_string();
     std::thread::spawn(move || {
         unsafe {
             let wide_msg = to_wide(&msg);
             let wide_title = to_wide("Thông báo");
-            // MB_TOPMOST: Đảm bảo thông báo hiện lên trên cùng, đè lên cả game và tool
             MessageBoxW(std::ptr::null_mut(), wide_msg.as_ptr(), wide_title.as_ptr(), MB_OK | MB_ICONWARNING | MB_TOPMOST);
         }
     });
@@ -1696,51 +1619,26 @@ pub struct ReaderState {
     pub chunks: Vec<String>,
     pub current_index: usize,
     pub is_playing: bool,
-    pub processing_audio: bool, // Đánh dấu đang tải/phát audio để tránh spam
+    pub processing_audio: bool,
 }
 
 impl ReaderState {
     fn new() -> Self {
-        Self {
-            is_open: false,
-            raw_text: String::new(),
-            chunks: Vec::new(),
-            current_index: 0,
-            is_playing: false,
-            processing_audio: false,
-        }
+        Self { is_open: false, raw_text: String::new(), chunks: Vec::new(), current_index: 0, is_playing: false, processing_audio: false, }
     }
-
-    // Logic tách câu thông minh: Giữ nguyên câu trong ngoặc kép
     pub fn parse_text(&mut self) {
         let text = self.raw_text.clone();
         let mut final_chunks = Vec::new();
         let mut current_sentence = String::new();
         let mut in_quote = false;
-
         for c in text.chars() {
-            // Xử lý các loại ngoặc kép (thẳng và cong)
-            if c == '"' || c == '“' || c == '”' {
-                in_quote = !in_quote;
-            }
-
+            if c == '"' || c == '“' || c == '”' { in_quote = !in_quote; }
             current_sentence.push(c);
-
-            // Chỉ ngắt câu khi gặp ký tự kết thúc VÀ không nằm trong ngoặc kép
-            // Ký tự kết thúc: . ! ? hoặc xuống dòng
             if !in_quote && (c == '.' || c == '!' || c == '?' || c == '\n') {
-                if !current_sentence.trim().is_empty() {
-                    final_chunks.push(current_sentence.trim().to_string());
-                    current_sentence.clear();
-                }
+                if !current_sentence.trim().is_empty() { final_chunks.push(current_sentence.trim().to_string()); current_sentence.clear(); }
             }
         }
-
-        // Đẩy phần còn lại nếu có
-        if !current_sentence.trim().is_empty() {
-            final_chunks.push(current_sentence.trim().to_string());
-        }
-
+        if !current_sentence.trim().is_empty() { final_chunks.push(current_sentence.trim().to_string()); }
         self.chunks = final_chunks;
         self.current_index = 0;
         self.is_playing = false;
@@ -1755,7 +1653,7 @@ pub struct UiState {
     pub show_arrow_window: bool,
     pub show_arrow_help: bool,
     pub show_password: bool,
-    pub reader: ReaderState, // <--- Thêm dòng này
+    pub reader: ReaderState,
 }
 
 #[derive(Clone)]
@@ -1787,51 +1685,25 @@ pub struct WwmState {
 
 impl UiState {
     pub fn new() -> Self {
-        Self {
-            show_popup: false,
-            popup_text: String::new(),
-            show_reset_confirm: false,
-            show_arrow_window: false,
-            show_arrow_help: false,
-            show_password: false,
-            reader: ReaderState::new(), // <--- Init
-        }
+        Self { show_popup: false, popup_text: String::new(), show_reset_confirm: false, show_arrow_window: false, show_arrow_help: false, show_password: false, reader: ReaderState::new(), }
     }
 }
 
 impl ConfigState {
     pub fn new(config: config::Config) -> Self {
-        Self {
-            gemini_api_key: config.gemini_api_key.clone(),
-            current_prompt: config.current_prompt.clone(),
-            editing_prompt_index: None,
-            selected_api: config.selected_api.clone(),
-            use_tts: config.use_tts,
-            config,
-        }
+        Self { gemini_api_key: config.gemini_api_key.clone(), current_prompt: config.current_prompt.clone(), editing_prompt_index: None, selected_api: config.selected_api.clone(), use_tts: config.use_tts, config, }
     }
 }
 
 impl HotkeyState {
     pub fn new(config: &config::Config) -> Self {
-        Self {
-            hotkey_translate: config.hotkey_translate.clone(),
-            hotkey_select: config.hotkey_select.clone(),
-            hotkey_instant: config.hotkey_instant.clone(),
-            hotkey_auto: config.hotkey_auto.clone(),
-            hotkey_toggle_auto: config.hotkey_toggle_auto.clone(),
-        }
+        Self { hotkey_translate: config.hotkey_translate.clone(), hotkey_select: config.hotkey_select.clone(), hotkey_instant: config.hotkey_instant.clone(), hotkey_auto: config.hotkey_auto.clone(), hotkey_toggle_auto: config.hotkey_toggle_auto.clone(), }
     }
 }
 
 impl WwmState {
     pub fn new() -> Self {
-        Self {
-            wwm_success_timer: None,
-            wwm_name_success_timer: None,
-            arrow_wwm_success_timer: None,
-            auto_translate_active: false,
-        }
+        Self { wwm_success_timer: None, wwm_name_success_timer: None, arrow_wwm_success_timer: None, auto_translate_active: false, }
     }
 }
 
@@ -1843,7 +1715,7 @@ pub trait UiRenderer {
     fn render_aux_regions_section(&mut self, ui: &mut egui::Ui);
     fn render_settings_section(&mut self, ui: &mut egui::Ui);
     fn render_wwm_section(&mut self, ctx: &egui::Context, ui: &mut egui::Ui);
-    fn render_reader_window(&mut self, ctx: &egui::Context); // <--- Thêm hàm này
+    fn render_reader_window(&mut self, ctx: &egui::Context);
     fn sync_config_from_file(&mut self);
     fn check_key_binding(&mut self);
     fn load_texture(&mut self, ctx: &egui::Context, bytes: &[u8], is_arrow: bool);
@@ -1855,10 +1727,7 @@ impl UiRenderer for super::MainApp {
             ui.heading(egui::RichText::new(APP_NAME).strong().size(24.0));
         });
         ui.add_space(5.0);
-
-        // Layout ngang, các phần tử sẽ nằm từ trái sang phải
         ui.horizontal(|ui| {
-            // 1. Checkbox Listening (Đổi tên thành "Nghe phím")
             let mut listening = !self.is_paused;
             if ui.checkbox(&mut listening, "✅ Nghe phím").changed() {
                 self.is_paused = !listening;
@@ -1868,30 +1737,21 @@ impl UiRenderer for super::MainApp {
                     AUTO_TRANSLATE_ENABLED.store(false, Ordering::Relaxed);
                 }
             }
-
-            // 2. Nút Ẩn vào Tray (Đổi tên thành "Ẩn")
             if ui.button("🔽 Ẩn").clicked() {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Visible(false));
             }
-
             ui.separator();
-
-            // Các nút tiện ích khác
             if ui.button(egui::RichText::new("📖 Đọc văn bản").small().strong()).clicked() {
                  self.ui_state.reader.is_open = true;
             }
-
             let theme_text = if self.config_state.config.is_dark_mode { "🌗 Tối" } else { "🌗 Sáng" };
             if ui.button(egui::RichText::new(theme_text).small()).clicked() {
                 self.config_state.config.is_dark_mode = !self.config_state.config.is_dark_mode;
                 self.config_state.config.save().unwrap();
             }
-
             if ui.button(egui::RichText::new("🔄 Reset").small().color(egui::Color32::RED)).clicked() {
                 self.ui_state.show_reset_confirm = true;
             }
-
-            // Đổi tên thành "by Baolinh0305"
             if ui.button(egui::RichText::new("👤 by Baolinh0305").small()).clicked() {
                   let _ = webbrowser::open("https://github.com/Baolinh0305/instant-screen-narrator/releases");
             }
@@ -1931,25 +1791,21 @@ impl UiRenderer for super::MainApp {
                 ui.label("API Key:");
                 ui.vertical(|ui| {
                       let show_pass = self.ui_state.show_password;
-
                       if self.config_state.selected_api == "gemini" {
                           if ui.add(egui::TextEdit::singleline(&mut self.config_state.gemini_api_key).password(!show_pass).desired_width(250.0)).changed() {
                               self.config_state.config.gemini_api_key = self.config_state.gemini_api_key.clone();
                               self.config_state.config.save().unwrap();
                           }
                       } else {
-                          // --- ĐÃ SỬA: Chỉ hiện 1 key duy nhất, xóa chức năng thêm key dự phòng ---
                           if self.config_state.config.groq_api_keys.is_empty() {
                               self.config_state.config.groq_api_keys.push(String::new());
                           }
-
                           if let Some(key) = self.config_state.config.groq_api_keys.get_mut(0) {
                               if ui.add(egui::TextEdit::singleline(key).password(!show_pass).desired_width(250.0)).changed() {
                                   self.config_state.config.save().unwrap();
                               }
                           }
                       }
-
                       if ui.button(if self.ui_state.show_password { "🙈 Ẩn Key" } else { "👁 Hiện Key" }).clicked() {
                           self.ui_state.show_password = !self.ui_state.show_password;
                       }
@@ -1974,8 +1830,6 @@ impl UiRenderer for super::MainApp {
                     self.config_state.editing_prompt_index = None;
                     self.config_state.config.save().unwrap();
                 }
-
-                // --- THÊM 2 NÚT NÀY ---
                 if ui.button("🔍 Phân tích hình ảnh").clicked() {
                     self.config_state.current_prompt = config::Config::get_analyze_prompt();
                     self.config_state.config.current_prompt = self.config_state.current_prompt.clone();
@@ -1988,8 +1842,6 @@ impl UiRenderer for super::MainApp {
                     self.config_state.editing_prompt_index = None;
                     self.config_state.config.save().unwrap();
                 }
-                // ----------------------
-
                 let mut to_select = None;
                 for (i, _) in self.config_state.config.saved_prompts.iter().enumerate() {
                     let btn_label = format!("Mẫu {}", i + 1);
@@ -1998,14 +1850,12 @@ impl UiRenderer for super::MainApp {
                         to_select = Some(i);
                     }
                 }
-
                 if let Some(i) = to_select {
                     self.config_state.editing_prompt_index = Some(i);
                     self.config_state.current_prompt = self.config_state.config.saved_prompts[i].content.clone();
                     self.config_state.config.current_prompt = self.config_state.current_prompt.clone();
                     self.config_state.config.save().unwrap();
                 }
-
                 if ui.button("➕").clicked() {
                     self.config_state.config.saved_prompts.push(config::CustomPrompt {
                         content: String::new(),
@@ -2015,9 +1865,7 @@ impl UiRenderer for super::MainApp {
                     self.config_state.config.save().unwrap();
                 }
             });
-
             ui.add_space(5.0);
-
             if let Some(idx) = self.config_state.editing_prompt_index {
                 if idx < self.config_state.config.saved_prompts.len() {
                     ui.horizontal(|ui| {
@@ -2034,7 +1882,6 @@ impl UiRenderer for super::MainApp {
                     });
                 }
             }
-
             if ui.add(egui::TextEdit::multiline(&mut self.config_state.current_prompt).desired_rows(4).desired_width(f32::INFINITY)).changed() {
                 self.config_state.config.current_prompt = self.config_state.current_prompt.clone();
                 self.config_state.config.save().unwrap();
@@ -2051,17 +1898,14 @@ impl UiRenderer for super::MainApp {
     fn render_hotkeys_section(&mut self, ui: &mut egui::Ui) {
         egui::CollapsingHeader::new(egui::RichText::new("⌨️ Phím tắt chung").strong()).default_open(true).show(ui, |ui| {
               egui::Grid::new("hotkey_grid").num_columns(2).spacing([20.0, 10.0]).striped(true).show(ui, |ui| {
-
                 let mut draw_bind_btn = |label: &str, target: BindingTarget, current_key: &str| {
                       ui.label(label);
                       let btn_text = if self.binding_target == Some(target) { "🛑 Đang chờ phím..." } else { current_key };
-
                       let btn = if self.binding_target == Some(target) {
                           egui::Button::new(egui::RichText::new(btn_text).color(egui::Color32::YELLOW))
                       } else {
                           egui::Button::new(btn_text)
                       };
-
                       if ui.add(btn).clicked() {
                           if self.binding_target == Some(target) {
                               self.binding_target = None;
@@ -2073,7 +1917,6 @@ impl UiRenderer for super::MainApp {
                       }
                       ui.end_row();
                  };
-
                  draw_bind_btn("Dịch vùng đã chọn:", BindingTarget::Translate, &self.hotkey_state.hotkey_translate);
                  draw_bind_btn("Chọn vùng dịch:", BindingTarget::Select, &self.hotkey_state.hotkey_select);
                  draw_bind_btn("Chụp & Dịch ngay:", BindingTarget::Instant, &self.hotkey_state.hotkey_instant);
@@ -2096,9 +1939,7 @@ impl UiRenderer for super::MainApp {
                 self.config_state.config.save().unwrap();
                 HOTKEYS_NEED_UPDATE.store(true, Ordering::Relaxed);
             }
-
             ui.add_space(5.0);
-
             let mut remove_idx = None;
             for (i, aux) in self.config_state.config.aux_regions.iter_mut().enumerate() {
                 ui.group(|ui| {
@@ -2109,32 +1950,23 @@ impl UiRenderer for super::MainApp {
                         });
                     });
                     ui.horizontal(|ui| {
-                        // Bind Select Key
                         ui.label("Chọn:");
                         let btn_txt_sel = if self.binding_target == Some(BindingTarget::AuxSelect(i)) { "..." } else { &aux.hotkey_select };
                         if ui.button(btn_txt_sel).clicked() {
                             self.binding_target = Some(BindingTarget::AuxSelect(i));
                             IS_BINDING_MODE.store(true, Ordering::Relaxed);
                         }
-
-                        // Bind Translate Key
                         ui.label("Dịch:");
                         let btn_txt_trans = if self.binding_target == Some(BindingTarget::AuxTranslate(i)) { "..." } else { &aux.hotkey_translate };
                         if ui.button(btn_txt_trans).clicked() {
                             self.binding_target = Some(BindingTarget::AuxTranslate(i));
                             IS_BINDING_MODE.store(true, Ordering::Relaxed);
                         }
-
-                        if aux.region.is_some() {
-                            ui.label("✅ Đã có vùng");
-                        } else {
-                            ui.label("⚠️ Chưa chọn vùng");
-                        }
+                        if aux.region.is_some() { ui.label("✅ Đã có vùng"); } else { ui.label("⚠️ Chưa chọn vùng"); }
                     });
                 });
                 ui.add_space(2.0);
             }
-
             if let Some(i) = remove_idx {
                 self.config_state.config.aux_regions.remove(i);
                 self.config_state.config.save().unwrap();
@@ -2146,7 +1978,6 @@ impl UiRenderer for super::MainApp {
     fn render_settings_section(&mut self, ui: &mut egui::Ui) {
         egui::CollapsingHeader::new(egui::RichText::new("⚙️ Cài đặt hiển thị & Âm thanh").strong()).default_open(true).show(ui, |ui| {
             egui::Grid::new("settings_grid").num_columns(2).spacing([20.0, 10.0]).show(ui, |ui| {
-
                 ui.label("Overlay:");
                 ui.vertical(|ui| {
                     if ui.add(egui::Checkbox::new(&mut self.config_state.config.show_overlay, "Hiện văn bản")).changed() {
@@ -2161,7 +1992,6 @@ impl UiRenderer for super::MainApp {
                     });
                 });
                 ui.end_row();
-
                 ui.label("TTS (Đọc):");
                 ui.vertical(|ui| {
                     if ui.add(egui::Checkbox::new(&mut self.config_state.use_tts, "Bật đọc")).changed() {
@@ -2176,7 +2006,6 @@ impl UiRenderer for super::MainApp {
                     });
                 });
                 ui.end_row();
-
                 ui.label("Tùy chọn khác:");
                 ui.vertical(|ui| {
                     if ui.add(egui::Checkbox::new(&mut self.config_state.config.freeze_screen, "Đóng băng khi chọn vùng")).changed() {
@@ -2184,19 +2013,16 @@ impl UiRenderer for super::MainApp {
                     }
                 });
                 ui.end_row();
-
                 ui.label("Copy Text:");
                 ui.vertical(|ui| {
                     if ui.add(egui::Checkbox::new(&mut self.config_state.config.auto_copy, "Tự động Copy kết quả")).changed() {
                         self.config_state.config.save().unwrap();
                     }
                     if self.config_state.config.auto_copy {
-                        // --- RADIO BUTTON CHO COPY BẢN GỐC ---
                         ui.horizontal(|ui| {
                             ui.radio_value(&mut self.config_state.config.copy_original, false, "Copy bản dịch");
                             ui.radio_value(&mut self.config_state.config.copy_original, true, "Copy bản gốc");
                         });
-                        // -------------------------------------
                         if ui.add(egui::Checkbox::new(&mut self.config_state.config.copy_instant_only, "Chỉ áp dụng lên Dịch nhanh")).changed() {
                             self.config_state.config.save().unwrap();
                         }
@@ -2208,16 +2034,13 @@ impl UiRenderer for super::MainApp {
     }
 
     fn render_wwm_section(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
-        // Giữ nguyên phần đầu là vertical_centered cho các nút chức năng chính
         ui.vertical_centered(|ui| {
             egui::CollapsingHeader::new(egui::RichText::new("🎮 Dịch Where Winds Meet").strong()).default_open(true).show(ui, |ui| {
                 ui.add_space(5.0);
-
                 ui.horizontal(|ui| {
                     ui.label("Phím tắt chọn vùng Mũi tên:");
                     let btn_text = if self.binding_target == Some(BindingTarget::Auto) { "🛑 Chờ..." } else { &self.hotkey_state.hotkey_auto };
                     let btn = if self.binding_target == Some(BindingTarget::Auto) { egui::Button::new(egui::RichText::new(btn_text).color(egui::Color32::YELLOW)) } else { egui::Button::new(btn_text) };
-
                     if ui.add(btn).clicked() {
                         if self.binding_target == Some(BindingTarget::Auto) { self.binding_target = None; IS_BINDING_MODE.store(false, Ordering::Relaxed); } else { self.binding_target = Some(BindingTarget::Auto); IS_BINDING_MODE.store(true, Ordering::Relaxed); }
                     }
@@ -2225,8 +2048,6 @@ impl UiRenderer for super::MainApp {
                     if ui.button("❓").clicked() { self.ui_state.show_arrow_help = true; }
                 });
                 ui.add_space(5.0);
-
-                // Normal WWM
                 ui.horizontal(|ui| {
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center).with_main_align(egui::Align::Center), |ui| {
                         let mut wwm_text = "🎯 Tự động chọn vùng dịch WWM";
@@ -2238,14 +2059,12 @@ impl UiRenderer for super::MainApp {
                             if let Some((win_x, win_y, win_w, win_h)) = get_game_bounds("Where Winds Meet") {
                                 let f_w = win_w as f32;
                                 let f_h = win_h as f32;
-
                                 let region = config::Region {
                                     x: win_x + (f_w * WWM_TEXT_REGION_X_RATIO) as i32 - WWM_REGION_PADDING,
                                     y: win_y + (f_h * WWM_TEXT_REGION_Y_RATIO) as i32 - WWM_REGION_PADDING,
                                     width: (f_w * WWM_TEXT_REGION_W_RATIO) as u32 + WWM_REGION_EXTRA_WIDTH,
                                     height: (f_h * WWM_TEXT_REGION_H_RATIO) as u32 + WWM_REGION_EXTRA_HEIGHT
                                 };
-
                                 self.config_state.config.fixed_regions.clear();
                                 self.config_state.config.fixed_regions.push(region.clone());
                                 self.config_state.current_prompt = config::Config::get_wuxia_prompt();
@@ -2262,8 +2081,6 @@ impl UiRenderer for super::MainApp {
                         ui.label(egui::RichText::new("(16:9)").italics().color(egui::Color32::GRAY));
                     });
                 });
-
-                // WWM with Name
                 ui.horizontal(|ui| {
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center).with_main_align(egui::Align::Center), |ui| {
                         let mut wwm_name_text = "🎯 Tự chọn vùng dịch WWM (có tên người thoại)";
@@ -2275,14 +2092,12 @@ impl UiRenderer for super::MainApp {
                             if let Some((win_x, win_y, win_w, win_h)) = get_game_bounds("Where Winds Meet") {
                                 let f_w = win_w as f32;
                                 let f_h = win_h as f32;
-                                
                                 let region = config::Region {
                                     x: win_x + (f_w * WWM_NAME_REGION_X_RATIO) as i32,
                                     y: win_y + (f_h * WWM_NAME_REGION_Y_RATIO) as i32,
                                     width: (f_w * WWM_NAME_REGION_W_RATIO) as u32,
                                     height: (f_h * WWM_NAME_REGION_H_RATIO) as u32
                                 };
-
                                 self.config_state.config.fixed_regions.clear();
                                 self.config_state.config.fixed_regions.push(region.clone());
                                 self.config_state.current_prompt = config::Config::get_wuxia_speaker_prompt();
@@ -2299,8 +2114,6 @@ impl UiRenderer for super::MainApp {
                         ui.label(egui::RichText::new("(16:9)").italics().color(egui::Color32::GRAY));
                     });
                 });
-
-                // Arrow Button
                 ui.horizontal(|ui| {
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center).with_main_align(egui::Align::Center), |ui| {
                         let mut arrow_text = "🏹 Tự động chọn vùng Mũi tên WWM";
@@ -2312,7 +2125,6 @@ impl UiRenderer for super::MainApp {
                             if let Some((win_x, win_y, win_w, win_h)) = get_game_bounds("Where Winds Meet") {
                                 let f_w = win_w as f32;
                                 let f_h = win_h as f32;
-
                                 let region = config::Region {
                                     x: win_x + (f_w * WWM_ARROW_REGION_X_RATIO) as i32,
                                     y: win_y + (f_h * WWM_ARROW_REGION_Y_RATIO) as i32,
@@ -2333,40 +2145,26 @@ impl UiRenderer for super::MainApp {
                     });
                 });
 
-                ui.add_space(5.0);
-                ui.label(egui::RichText::new("⚡ Tốc độ nhận diện mũi tên").strong());
-                if ui.add(egui::Slider::new(&mut self.config_state.config.arrow_check_interval, ARROW_CHECK_INTERVAL_MIN..=ARROW_CHECK_INTERVAL_MAX).text("s")).changed() {
-                    self.config_state.config.save().unwrap();
-                }
-                if (self.config_state.config.arrow_check_interval - DEFAULT_ARROW_CHECK_INTERVAL).abs() < 0.001 {
-                    ui.colored_label(egui::Color32::GREEN, "(Nên để mặc định: 0.02)");
-                } else {
-                    ui.label(format!("(Quét mỗi {:.2} giây)", self.config_state.config.arrow_check_interval));
-                }
-                ui.add_space(5.0);
+                // --- ĐÃ ẨN SLIDER TỐC ĐỘ MŨI TÊN TẠI ĐÂY ---
 
+                ui.add_space(5.0);
                 ui.horizontal(|ui| {
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center).with_main_align(egui::Align::Center), |ui| {
                         let btn_text = if self.wwm_state.auto_translate_active { "🔄 ĐANG BẬT TỰ ĐỘNG DỊCH" } else { "🔄 Bật Tự Động Dịch" };
                         let btn_color = if self.wwm_state.auto_translate_active { egui::Color32::DARK_GREEN } else { egui::Color32::from_rgb(60, 60, 60) };
-
                         if ui.add(egui::Button::new(egui::RichText::new(btn_text).strong().color(egui::Color32::WHITE)).fill(btn_color).min_size(egui::vec2(200.0, 30.0))).clicked() {
                             self.wwm_state.auto_translate_active = !self.wwm_state.auto_translate_active;
                             AUTO_TRANSLATE_ENABLED.store(self.wwm_state.auto_translate_active, Ordering::Relaxed);
-                            // Gọi thông báo UX
                             crate::show_toggle_notification(self.wwm_state.auto_translate_active);
                         }
                     });
                 });
-
                 ui.separator();
-
                 ui.horizontal(|ui| {
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center).with_main_align(egui::Align::Center), |ui| {
                         if ui.button("🐞 Debug Overlay").clicked() {
                             overlay::toggle_debug_overlay();
                         }
-
                         if ui.button("📂 Đổi ảnh mũi tên").clicked() {
                             if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png"]).pick_file() {
                                 if let Ok(bytes) = fs::read(&path) {
@@ -2386,9 +2184,8 @@ impl UiRenderer for super::MainApp {
                         }
                     });
                 });
-                // Đã xóa ui.add_space(5.0) ở cuối để sát lề dưới
-            }); // End CollapsingHeader
-        }); // End vertical_centered
+            });
+        });
     }
 
     fn sync_config_from_file(&mut self) {
@@ -2405,30 +2202,18 @@ impl UiRenderer for super::MainApp {
                 for vk in VK_MIN..VK_MAX {
                     if (winapi::um::winuser::GetAsyncKeyState(vk) as u16 & KEY_STATE_MASK) != 0 {
                         if vk == winapi::um::winuser::VK_LBUTTON || vk == winapi::um::winuser::VK_RBUTTON || vk == winapi::um::winuser::VK_MBUTTON { continue; }
-
                         let key_name = crate::key_utils::get_name_from_vk(vk);
-
                         match target {
                             BindingTarget::Translate => { self.hotkey_state.hotkey_translate = key_name.clone(); self.config_state.config.hotkey_translate = key_name; }
                             BindingTarget::Select => { self.hotkey_state.hotkey_select = key_name.clone(); self.config_state.config.hotkey_select = key_name; }
                             BindingTarget::Instant => { self.hotkey_state.hotkey_instant = key_name.clone(); self.config_state.config.hotkey_instant = key_name; }
                             BindingTarget::Auto => { self.hotkey_state.hotkey_auto = key_name.clone(); self.config_state.config.hotkey_auto = key_name; }
                             BindingTarget::ToggleAuto => { self.hotkey_state.hotkey_toggle_auto = key_name.clone(); self.config_state.config.hotkey_toggle_auto = key_name; }
-                            // --- BINDING AUX REGIONS ---
-                            BindingTarget::AuxSelect(idx) => {
-                                if idx < self.config_state.config.aux_regions.len() {
-                                    self.config_state.config.aux_regions[idx].hotkey_select = key_name;
-                                }
-                            }
-                            BindingTarget::AuxTranslate(idx) => {
-                                if idx < self.config_state.config.aux_regions.len() {
-                                    self.config_state.config.aux_regions[idx].hotkey_translate = key_name;
-                                }
-                            }
+                            BindingTarget::AuxSelect(idx) => { if idx < self.config_state.config.aux_regions.len() { self.config_state.config.aux_regions[idx].hotkey_select = key_name; } }
+                            BindingTarget::AuxTranslate(idx) => { if idx < self.config_state.config.aux_regions.len() { self.config_state.config.aux_regions[idx].hotkey_translate = key_name; } }
                         }
                         self.config_state.config.save().unwrap();
                         HOTKEYS_NEED_UPDATE.store(true, Ordering::Relaxed);
-
                         self.binding_target = None;
                         IS_BINDING_MODE.store(false, Ordering::Relaxed);
                         std::thread::sleep(std::time::Duration::from_millis(BINDING_SLEEP_MS));
@@ -2439,90 +2224,58 @@ impl UiRenderer for super::MainApp {
         }
     }
 
-    // 2. Implement hàm render_reader_window
     fn render_reader_window(&mut self, ctx: &egui::Context) {
         if !self.ui_state.reader.is_open { return; }
-
         let mut open = true;
-        egui::Window::new("Trình đọc văn bản (Text to Speech)")
-            .open(&mut open)
-            .resize(|r| r.fixed_size(egui::vec2(600.0, 700.0)))
-            .show(ctx, |ui| {
-
-                ui.horizontal(|ui| {
-                    if ui.button("📂 Mở file Text").clicked() {
-                        if let Some(path) = rfd::FileDialog::new().add_filter("Text", &["txt"]).pick_file() {
-                             if let Ok(content) = std::fs::read_to_string(path) {
-                                 self.ui_state.reader.raw_text = content;
-                                 self.ui_state.reader.parse_text();
-                             }
-                        }
-                    }
-                    if ui.button("🧹 Xóa hết").clicked() {
-                        self.ui_state.reader.raw_text.clear();
-                        self.ui_state.reader.chunks.clear();
-                        self.ui_state.reader.is_playing = false;
-                        self.ui_state.reader.current_index = 0;
-                    }
-                });
-
-                ui.label("Nhập văn bản vào đây:");
-                if ui.add(egui::TextEdit::multiline(&mut self.ui_state.reader.raw_text)
-                    .desired_rows(5)
-                    .desired_width(f32::INFINITY))
-                    .changed()
-                {
-                    // Nếu người dùng sửa text gốc, ta dừng đọc và parse lại
-                    self.ui_state.reader.is_playing = false;
-                    self.ui_state.reader.parse_text();
-                }
-
-                ui.separator();
-
-                // Controls
-                ui.horizontal(|ui| {
-                    let icon_play = if self.ui_state.reader.is_playing { "⏸ Tạm dừng" } else { "▶ Đọc tiếp" };
-                    if ui.button(icon_play).clicked() {
-                         self.ui_state.reader.is_playing = !self.ui_state.reader.is_playing;
-                         if self.ui_state.reader.chunks.is_empty() {
+        egui::Window::new("Trình đọc văn bản (Text to Speech)").open(&mut open).resize(|r| r.fixed_size(egui::vec2(600.0, 700.0))).show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                if ui.button("📂 Mở file Text").clicked() {
+                    if let Some(path) = rfd::FileDialog::new().add_filter("Text", &["txt"]).pick_file() {
+                         if let Ok(content) = std::fs::read_to_string(path) {
+                             self.ui_state.reader.raw_text = content;
                              self.ui_state.reader.parse_text();
-                             self.ui_state.reader.is_playing = true;
                          }
                     }
-
-                    if ui.button("⏹ Dừng lại").clicked() {
-                        self.ui_state.reader.is_playing = false;
-                        self.ui_state.reader.current_index = 0;
-                    }
-
-                    ui.label("Tốc độ:");
-                    ui.add(egui::Slider::new(&mut self.config_state.config.speed, 0.5..=2.0));
-                });
-
-                ui.separator();
-                ui.label(egui::RichText::new("Danh sách câu (Nhấn vào để đọc từ câu đó):").strong());
-
-                // List sentences
-                egui::ScrollArea::vertical().stick_to_bottom(true).max_height(400.0).show(ui, |ui| {
-                    for (i, chunk) in self.ui_state.reader.chunks.iter().enumerate() {
-                        let is_active = i == self.ui_state.reader.current_index;
-                        let text = format!("{}. {}", i + 1, chunk);
-
-                        let label = egui::SelectableLabel::new(is_active, text);
-                        if ui.add_sized([ui.available_width(), 0.0], label).clicked() {
-                            self.ui_state.reader.current_index = i;
-                            self.ui_state.reader.is_playing = true;
-
-                            // SỬA: Xóa buffer cũ khi click nhảy câu để tránh đọc sai
-                            self.next_audio_buffer = None;
-                            self.is_downloading_next = false;
-                            // Thread âm thanh hiện tại vẫn sẽ đọc hết câu cũ (do blocking),
-                            // nhưng câu tiếp theo sẽ được load đúng index mới
-                        }
-                    }
-                });
+                }
+                if ui.button("🧹 Xóa hết").clicked() {
+                    self.ui_state.reader.raw_text.clear();
+                    self.ui_state.reader.chunks.clear();
+                    self.ui_state.reader.is_playing = false;
+                    self.ui_state.reader.current_index = 0;
+                }
             });
-
+            ui.label("Nhập văn bản vào đây:");
+            if ui.add(egui::TextEdit::multiline(&mut self.ui_state.reader.raw_text).desired_rows(5).desired_width(f32::INFINITY)).changed() {
+                self.ui_state.reader.is_playing = false;
+                self.ui_state.reader.parse_text();
+            }
+            ui.separator();
+            ui.horizontal(|ui| {
+                let icon_play = if self.ui_state.reader.is_playing { "⏸ Tạm dừng" } else { "▶ Đọc tiếp" };
+                if ui.button(icon_play).clicked() {
+                     self.ui_state.reader.is_playing = !self.ui_state.reader.is_playing;
+                     if self.ui_state.reader.chunks.is_empty() { self.ui_state.reader.parse_text(); self.ui_state.reader.is_playing = true; }
+                }
+                if ui.button("⏹ Dừng lại").clicked() { self.ui_state.reader.is_playing = false; self.ui_state.reader.current_index = 0; }
+                ui.label("Tốc độ:");
+                ui.add(egui::Slider::new(&mut self.config_state.config.speed, 0.5..=2.0));
+            });
+            ui.separator();
+            ui.label(egui::RichText::new("Danh sách câu (Nhấn vào để đọc từ câu đó):").strong());
+            egui::ScrollArea::vertical().stick_to_bottom(true).max_height(400.0).show(ui, |ui| {
+                for (i, chunk) in self.ui_state.reader.chunks.iter().enumerate() {
+                    let is_active = i == self.ui_state.reader.current_index;
+                    let text = format!("{}. {}", i + 1, chunk);
+                    let label = egui::SelectableLabel::new(is_active, text);
+                    if ui.add_sized([ui.available_width(), 0.0], label).clicked() {
+                        self.ui_state.reader.current_index = i;
+                        self.ui_state.reader.is_playing = true;
+                        self.next_audio_buffer = None;
+                        self.is_downloading_next = false;
+                    }
+                }
+            });
+        });
         self.ui_state.reader.is_open = open;
     }
 
@@ -2892,7 +2645,13 @@ impl MainApp {
                 if let Some(region) = regions.first() {
                     let rect = RECT { left: region.x, top: region.y, right: region.x + region.width as i32, bottom: region.y + region.height as i32 };
                     let duration_ms = (cleaned_show.chars().count() as f32 / 10.0 * 1000.0) as u32;
-                    std::thread::spawn(move || { show_result_window(rect, cleaned_show, duration_ms); });
+                    let text_final = cleaned_show.clone();
+                    std::thread::spawn(move || {
+                        // Nếu không update được (do không phải mode auto/không có loading), thì hiện cửa sổ mới
+                        if !overlay::update_loading_window(text_final.clone()) {
+                             overlay::show_result_window(rect, text_final, duration_ms);
+                        }
+                    });
                 }
             }
         }
@@ -2960,9 +2719,29 @@ impl MainApp {
 
                 if let Some(arrow_region) = &config.arrow_region {
                     let found = capture::is_template_present(arrow_region, &arrow_bytes);
+
+                    // --- THÊM DÒNG NÀY ĐỂ CẬP NHẬT TRẠNG THÁI DEBUG ---
+                    crate::overlay::ARROW_DEBUG_STATE.store(found, Ordering::Relaxed);
+                    // --------------------------------------------------
+
                     if found {
-                        miss_counter = 0; 
+                        miss_counter = 0;
                         if !last_found_state {
+                            // --- SỬA Ở ĐÂY: Hiện Loading Overlay ngay lập tức ---
+                            if config.show_overlay {
+                                if let Some(target_region) = config.fixed_regions.first() {
+                                    let rect = RECT {
+                                        left: target_region.x,
+                                        top: target_region.y,
+                                        right: target_region.x + target_region.width as i32,
+                                        bottom: target_region.y + target_region.height as i32
+                                    };
+                                    // Hiện cửa sổ loading "..."
+                                    std::thread::spawn(move || { overlay::show_loading_window(rect); });
+                                }
+                            }
+                            // ----------------------------------------------------
+
                             let tx_inner = tx_auto.clone();
                             let should_copy = config.auto_copy && !config.copy_instant_only;
                             rt.block_on(async { Self::translate_regions(config.clone(), config.fixed_regions.clone(), tx_inner, should_copy).await; });

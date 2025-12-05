@@ -1,3 +1,4 @@
+// ... (Giữ nguyên các phần import ở đầu file)
 use crate::config;
 use crate::overlay;
 use eframe::egui;
@@ -45,49 +46,32 @@ use webbrowser;
 use std::fs;
 use rfd;
 
-// Helper: Chuyển chuỗi sang wide string
+// ... (Giữ nguyên các hàm helper to_wide, get_game_bounds, show_alert, ReaderState, UiState...)
 fn to_wide(s: &str) -> Vec<u16> {
     OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
 }
 
-// Helper: Lấy tọa độ Client của cửa sổ Game
 fn get_game_bounds(window_title: &str) -> Option<(i32, i32, u32, u32)> {
     unsafe {
         let wide_title = to_wide(window_title);
-        // Tìm cửa sổ theo tên (Class để null)
         let hwnd = FindWindowW(std::ptr::null(), wide_title.as_ptr());
-
-        if hwnd.is_null() || IsWindowVisible(hwnd) == 0 {
-            return None;
-        }
-
+        if hwnd.is_null() || IsWindowVisible(hwnd) == 0 { return None; }
         let mut rect: RECT = std::mem::zeroed();
-        // Lấy kích thước vùng nội dung (bỏ thanh tiêu đề)
-        if GetClientRect(hwnd, &mut rect) == 0 {
-            return None;
-        }
-
-        // Chuyển đổi điểm (0,0) của vùng nội dung sang tọa độ màn hình
+        if GetClientRect(hwnd, &mut rect) == 0 { return None; }
         let mut point = POINT { x: 0, y: 0 };
-        if ClientToScreen(hwnd, &mut point) == 0 {
-            return None;
-        }
-
+        if ClientToScreen(hwnd, &mut point) == 0 { return None; }
         let width = (rect.right - rect.left) as u32;
         let height = (rect.bottom - rect.top) as u32;
-
         Some((point.x, point.y, width, height))
     }
 }
 
-// Helper: Hiện thông báo lỗi (Chạy thread riêng + TopMost để không bị che)
 fn show_alert(message: &str) {
     let msg = message.to_string();
     std::thread::spawn(move || {
         unsafe {
             let wide_msg = to_wide(&msg);
             let wide_title = to_wide("Thông báo");
-            // MB_TOPMOST: Đảm bảo thông báo hiện lên trên cùng, đè lên cả game và tool
             MessageBoxW(std::ptr::null_mut(), wide_msg.as_ptr(), wide_title.as_ptr(), MB_OK | MB_ICONWARNING | MB_TOPMOST);
         }
     });
@@ -100,51 +84,26 @@ pub struct ReaderState {
     pub chunks: Vec<String>,
     pub current_index: usize,
     pub is_playing: bool,
-    pub processing_audio: bool, // Đánh dấu đang tải/phát audio để tránh spam
+    pub processing_audio: bool,
 }
 
 impl ReaderState {
     fn new() -> Self {
-        Self {
-            is_open: false,
-            raw_text: String::new(),
-            chunks: Vec::new(),
-            current_index: 0,
-            is_playing: false,
-            processing_audio: false,
-        }
+        Self { is_open: false, raw_text: String::new(), chunks: Vec::new(), current_index: 0, is_playing: false, processing_audio: false, }
     }
-
-    // Logic tách câu thông minh: Giữ nguyên câu trong ngoặc kép
     pub fn parse_text(&mut self) {
         let text = self.raw_text.clone();
         let mut final_chunks = Vec::new();
         let mut current_sentence = String::new();
         let mut in_quote = false;
-
         for c in text.chars() {
-            // Xử lý các loại ngoặc kép (thẳng và cong)
-            if c == '"' || c == '“' || c == '”' {
-                in_quote = !in_quote;
-            }
-
+            if c == '"' || c == '“' || c == '”' { in_quote = !in_quote; }
             current_sentence.push(c);
-
-            // Chỉ ngắt câu khi gặp ký tự kết thúc VÀ không nằm trong ngoặc kép
-            // Ký tự kết thúc: . ! ? hoặc xuống dòng
             if !in_quote && (c == '.' || c == '!' || c == '?' || c == '\n') {
-                if !current_sentence.trim().is_empty() {
-                    final_chunks.push(current_sentence.trim().to_string());
-                    current_sentence.clear();
-                }
+                if !current_sentence.trim().is_empty() { final_chunks.push(current_sentence.trim().to_string()); current_sentence.clear(); }
             }
         }
-
-        // Đẩy phần còn lại nếu có
-        if !current_sentence.trim().is_empty() {
-            final_chunks.push(current_sentence.trim().to_string());
-        }
-
+        if !current_sentence.trim().is_empty() { final_chunks.push(current_sentence.trim().to_string()); }
         self.chunks = final_chunks;
         self.current_index = 0;
         self.is_playing = false;
@@ -159,7 +118,7 @@ pub struct UiState {
     pub show_arrow_window: bool,
     pub show_arrow_help: bool,
     pub show_password: bool,
-    pub reader: ReaderState, // <--- Thêm dòng này
+    pub reader: ReaderState,
 }
 
 #[derive(Clone)]
@@ -191,51 +150,25 @@ pub struct WwmState {
 
 impl UiState {
     pub fn new() -> Self {
-        Self {
-            show_popup: false,
-            popup_text: String::new(),
-            show_reset_confirm: false,
-            show_arrow_window: false,
-            show_arrow_help: false,
-            show_password: false,
-            reader: ReaderState::new(), // <--- Init
-        }
+        Self { show_popup: false, popup_text: String::new(), show_reset_confirm: false, show_arrow_window: false, show_arrow_help: false, show_password: false, reader: ReaderState::new(), }
     }
 }
 
 impl ConfigState {
     pub fn new(config: config::Config) -> Self {
-        Self {
-            gemini_api_key: config.gemini_api_key.clone(),
-            current_prompt: config.current_prompt.clone(),
-            editing_prompt_index: None,
-            selected_api: config.selected_api.clone(),
-            use_tts: config.use_tts,
-            config,
-        }
+        Self { gemini_api_key: config.gemini_api_key.clone(), current_prompt: config.current_prompt.clone(), editing_prompt_index: None, selected_api: config.selected_api.clone(), use_tts: config.use_tts, config, }
     }
 }
 
 impl HotkeyState {
     pub fn new(config: &config::Config) -> Self {
-        Self {
-            hotkey_translate: config.hotkey_translate.clone(),
-            hotkey_select: config.hotkey_select.clone(),
-            hotkey_instant: config.hotkey_instant.clone(),
-            hotkey_auto: config.hotkey_auto.clone(),
-            hotkey_toggle_auto: config.hotkey_toggle_auto.clone(),
-        }
+        Self { hotkey_translate: config.hotkey_translate.clone(), hotkey_select: config.hotkey_select.clone(), hotkey_instant: config.hotkey_instant.clone(), hotkey_auto: config.hotkey_auto.clone(), hotkey_toggle_auto: config.hotkey_toggle_auto.clone(), }
     }
 }
 
 impl WwmState {
     pub fn new() -> Self {
-        Self {
-            wwm_success_timer: None,
-            wwm_name_success_timer: None,
-            arrow_wwm_success_timer: None,
-            auto_translate_active: false,
-        }
+        Self { wwm_success_timer: None, wwm_name_success_timer: None, arrow_wwm_success_timer: None, auto_translate_active: false, }
     }
 }
 
@@ -247,7 +180,7 @@ pub trait UiRenderer {
     fn render_aux_regions_section(&mut self, ui: &mut egui::Ui);
     fn render_settings_section(&mut self, ui: &mut egui::Ui);
     fn render_wwm_section(&mut self, ctx: &egui::Context, ui: &mut egui::Ui);
-    fn render_reader_window(&mut self, ctx: &egui::Context); // <--- Thêm hàm này
+    fn render_reader_window(&mut self, ctx: &egui::Context);
     fn sync_config_from_file(&mut self);
     fn check_key_binding(&mut self);
     fn load_texture(&mut self, ctx: &egui::Context, bytes: &[u8], is_arrow: bool);
@@ -259,10 +192,7 @@ impl UiRenderer for super::MainApp {
             ui.heading(egui::RichText::new(APP_NAME).strong().size(24.0));
         });
         ui.add_space(5.0);
-
-        // Layout ngang, các phần tử sẽ nằm từ trái sang phải
         ui.horizontal(|ui| {
-            // 1. Checkbox Listening (Đổi tên thành "Nghe phím")
             let mut listening = !self.is_paused;
             if ui.checkbox(&mut listening, "✅ Nghe phím").changed() {
                 self.is_paused = !listening;
@@ -272,30 +202,21 @@ impl UiRenderer for super::MainApp {
                     AUTO_TRANSLATE_ENABLED.store(false, Ordering::Relaxed);
                 }
             }
-
-            // 2. Nút Ẩn vào Tray (Đổi tên thành "Ẩn")
             if ui.button("🔽 Ẩn").clicked() {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Visible(false));
             }
-
             ui.separator();
-
-            // Các nút tiện ích khác
             if ui.button(egui::RichText::new("📖 Đọc văn bản").small().strong()).clicked() {
                  self.ui_state.reader.is_open = true;
             }
-
             let theme_text = if self.config_state.config.is_dark_mode { "🌗 Tối" } else { "🌗 Sáng" };
             if ui.button(egui::RichText::new(theme_text).small()).clicked() {
                 self.config_state.config.is_dark_mode = !self.config_state.config.is_dark_mode;
                 self.config_state.config.save().unwrap();
             }
-
             if ui.button(egui::RichText::new("🔄 Reset").small().color(egui::Color32::RED)).clicked() {
                 self.ui_state.show_reset_confirm = true;
             }
-
-            // Đổi tên thành "by Baolinh0305"
             if ui.button(egui::RichText::new("👤 by Baolinh0305").small()).clicked() {
                   let _ = webbrowser::open("https://github.com/Baolinh0305/instant-screen-narrator/releases");
             }
@@ -335,25 +256,21 @@ impl UiRenderer for super::MainApp {
                 ui.label("API Key:");
                 ui.vertical(|ui| {
                       let show_pass = self.ui_state.show_password;
-
                       if self.config_state.selected_api == "gemini" {
                           if ui.add(egui::TextEdit::singleline(&mut self.config_state.gemini_api_key).password(!show_pass).desired_width(250.0)).changed() {
                               self.config_state.config.gemini_api_key = self.config_state.gemini_api_key.clone();
                               self.config_state.config.save().unwrap();
                           }
                       } else {
-                          // --- ĐÃ SỬA: Chỉ hiện 1 key duy nhất, xóa chức năng thêm key dự phòng ---
                           if self.config_state.config.groq_api_keys.is_empty() {
                               self.config_state.config.groq_api_keys.push(String::new());
                           }
-
                           if let Some(key) = self.config_state.config.groq_api_keys.get_mut(0) {
                               if ui.add(egui::TextEdit::singleline(key).password(!show_pass).desired_width(250.0)).changed() {
                                   self.config_state.config.save().unwrap();
                               }
                           }
                       }
-
                       if ui.button(if self.ui_state.show_password { "🙈 Ẩn Key" } else { "👁 Hiện Key" }).clicked() {
                           self.ui_state.show_password = !self.ui_state.show_password;
                       }
@@ -378,8 +295,6 @@ impl UiRenderer for super::MainApp {
                     self.config_state.editing_prompt_index = None;
                     self.config_state.config.save().unwrap();
                 }
-
-                // --- THÊM 2 NÚT NÀY ---
                 if ui.button("🔍 Phân tích hình ảnh").clicked() {
                     self.config_state.current_prompt = config::Config::get_analyze_prompt();
                     self.config_state.config.current_prompt = self.config_state.current_prompt.clone();
@@ -392,8 +307,6 @@ impl UiRenderer for super::MainApp {
                     self.config_state.editing_prompt_index = None;
                     self.config_state.config.save().unwrap();
                 }
-                // ----------------------
-
                 let mut to_select = None;
                 for (i, _) in self.config_state.config.saved_prompts.iter().enumerate() {
                     let btn_label = format!("Mẫu {}", i + 1);
@@ -402,14 +315,12 @@ impl UiRenderer for super::MainApp {
                         to_select = Some(i);
                     }
                 }
-
                 if let Some(i) = to_select {
                     self.config_state.editing_prompt_index = Some(i);
                     self.config_state.current_prompt = self.config_state.config.saved_prompts[i].content.clone();
                     self.config_state.config.current_prompt = self.config_state.current_prompt.clone();
                     self.config_state.config.save().unwrap();
                 }
-
                 if ui.button("➕").clicked() {
                     self.config_state.config.saved_prompts.push(config::CustomPrompt {
                         content: String::new(),
@@ -419,9 +330,7 @@ impl UiRenderer for super::MainApp {
                     self.config_state.config.save().unwrap();
                 }
             });
-
             ui.add_space(5.0);
-
             if let Some(idx) = self.config_state.editing_prompt_index {
                 if idx < self.config_state.config.saved_prompts.len() {
                     ui.horizontal(|ui| {
@@ -438,7 +347,6 @@ impl UiRenderer for super::MainApp {
                     });
                 }
             }
-
             if ui.add(egui::TextEdit::multiline(&mut self.config_state.current_prompt).desired_rows(4).desired_width(f32::INFINITY)).changed() {
                 self.config_state.config.current_prompt = self.config_state.current_prompt.clone();
                 self.config_state.config.save().unwrap();
@@ -455,17 +363,14 @@ impl UiRenderer for super::MainApp {
     fn render_hotkeys_section(&mut self, ui: &mut egui::Ui) {
         egui::CollapsingHeader::new(egui::RichText::new("⌨️ Phím tắt chung").strong()).default_open(true).show(ui, |ui| {
               egui::Grid::new("hotkey_grid").num_columns(2).spacing([20.0, 10.0]).striped(true).show(ui, |ui| {
-
                 let mut draw_bind_btn = |label: &str, target: BindingTarget, current_key: &str| {
                       ui.label(label);
                       let btn_text = if self.binding_target == Some(target) { "🛑 Đang chờ phím..." } else { current_key };
-
                       let btn = if self.binding_target == Some(target) {
                           egui::Button::new(egui::RichText::new(btn_text).color(egui::Color32::YELLOW))
                       } else {
                           egui::Button::new(btn_text)
                       };
-
                       if ui.add(btn).clicked() {
                           if self.binding_target == Some(target) {
                               self.binding_target = None;
@@ -477,7 +382,6 @@ impl UiRenderer for super::MainApp {
                       }
                       ui.end_row();
                  };
-
                  draw_bind_btn("Dịch vùng đã chọn:", BindingTarget::Translate, &self.hotkey_state.hotkey_translate);
                  draw_bind_btn("Chọn vùng dịch:", BindingTarget::Select, &self.hotkey_state.hotkey_select);
                  draw_bind_btn("Chụp & Dịch ngay:", BindingTarget::Instant, &self.hotkey_state.hotkey_instant);
@@ -500,9 +404,7 @@ impl UiRenderer for super::MainApp {
                 self.config_state.config.save().unwrap();
                 HOTKEYS_NEED_UPDATE.store(true, Ordering::Relaxed);
             }
-
             ui.add_space(5.0);
-
             let mut remove_idx = None;
             for (i, aux) in self.config_state.config.aux_regions.iter_mut().enumerate() {
                 ui.group(|ui| {
@@ -513,32 +415,23 @@ impl UiRenderer for super::MainApp {
                         });
                     });
                     ui.horizontal(|ui| {
-                        // Bind Select Key
                         ui.label("Chọn:");
                         let btn_txt_sel = if self.binding_target == Some(BindingTarget::AuxSelect(i)) { "..." } else { &aux.hotkey_select };
                         if ui.button(btn_txt_sel).clicked() {
                             self.binding_target = Some(BindingTarget::AuxSelect(i));
                             IS_BINDING_MODE.store(true, Ordering::Relaxed);
                         }
-
-                        // Bind Translate Key
                         ui.label("Dịch:");
                         let btn_txt_trans = if self.binding_target == Some(BindingTarget::AuxTranslate(i)) { "..." } else { &aux.hotkey_translate };
                         if ui.button(btn_txt_trans).clicked() {
                             self.binding_target = Some(BindingTarget::AuxTranslate(i));
                             IS_BINDING_MODE.store(true, Ordering::Relaxed);
                         }
-
-                        if aux.region.is_some() {
-                            ui.label("✅ Đã có vùng");
-                        } else {
-                            ui.label("⚠️ Chưa chọn vùng");
-                        }
+                        if aux.region.is_some() { ui.label("✅ Đã có vùng"); } else { ui.label("⚠️ Chưa chọn vùng"); }
                     });
                 });
                 ui.add_space(2.0);
             }
-
             if let Some(i) = remove_idx {
                 self.config_state.config.aux_regions.remove(i);
                 self.config_state.config.save().unwrap();
@@ -550,7 +443,6 @@ impl UiRenderer for super::MainApp {
     fn render_settings_section(&mut self, ui: &mut egui::Ui) {
         egui::CollapsingHeader::new(egui::RichText::new("⚙️ Cài đặt hiển thị & Âm thanh").strong()).default_open(true).show(ui, |ui| {
             egui::Grid::new("settings_grid").num_columns(2).spacing([20.0, 10.0]).show(ui, |ui| {
-
                 ui.label("Overlay:");
                 ui.vertical(|ui| {
                     if ui.add(egui::Checkbox::new(&mut self.config_state.config.show_overlay, "Hiện văn bản")).changed() {
@@ -565,7 +457,6 @@ impl UiRenderer for super::MainApp {
                     });
                 });
                 ui.end_row();
-
                 ui.label("TTS (Đọc):");
                 ui.vertical(|ui| {
                     if ui.add(egui::Checkbox::new(&mut self.config_state.use_tts, "Bật đọc")).changed() {
@@ -580,7 +471,6 @@ impl UiRenderer for super::MainApp {
                     });
                 });
                 ui.end_row();
-
                 ui.label("Tùy chọn khác:");
                 ui.vertical(|ui| {
                     if ui.add(egui::Checkbox::new(&mut self.config_state.config.freeze_screen, "Đóng băng khi chọn vùng")).changed() {
@@ -588,19 +478,16 @@ impl UiRenderer for super::MainApp {
                     }
                 });
                 ui.end_row();
-
                 ui.label("Copy Text:");
                 ui.vertical(|ui| {
                     if ui.add(egui::Checkbox::new(&mut self.config_state.config.auto_copy, "Tự động Copy kết quả")).changed() {
                         self.config_state.config.save().unwrap();
                     }
                     if self.config_state.config.auto_copy {
-                        // --- RADIO BUTTON CHO COPY BẢN GỐC ---
                         ui.horizontal(|ui| {
                             ui.radio_value(&mut self.config_state.config.copy_original, false, "Copy bản dịch");
                             ui.radio_value(&mut self.config_state.config.copy_original, true, "Copy bản gốc");
                         });
-                        // -------------------------------------
                         if ui.add(egui::Checkbox::new(&mut self.config_state.config.copy_instant_only, "Chỉ áp dụng lên Dịch nhanh")).changed() {
                             self.config_state.config.save().unwrap();
                         }
@@ -612,16 +499,13 @@ impl UiRenderer for super::MainApp {
     }
 
     fn render_wwm_section(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
-        // Giữ nguyên phần đầu là vertical_centered cho các nút chức năng chính
         ui.vertical_centered(|ui| {
             egui::CollapsingHeader::new(egui::RichText::new("🎮 Dịch Where Winds Meet").strong()).default_open(true).show(ui, |ui| {
                 ui.add_space(5.0);
-
                 ui.horizontal(|ui| {
                     ui.label("Phím tắt chọn vùng Mũi tên:");
                     let btn_text = if self.binding_target == Some(BindingTarget::Auto) { "🛑 Chờ..." } else { &self.hotkey_state.hotkey_auto };
                     let btn = if self.binding_target == Some(BindingTarget::Auto) { egui::Button::new(egui::RichText::new(btn_text).color(egui::Color32::YELLOW)) } else { egui::Button::new(btn_text) };
-
                     if ui.add(btn).clicked() {
                         if self.binding_target == Some(BindingTarget::Auto) { self.binding_target = None; IS_BINDING_MODE.store(false, Ordering::Relaxed); } else { self.binding_target = Some(BindingTarget::Auto); IS_BINDING_MODE.store(true, Ordering::Relaxed); }
                     }
@@ -629,8 +513,6 @@ impl UiRenderer for super::MainApp {
                     if ui.button("❓").clicked() { self.ui_state.show_arrow_help = true; }
                 });
                 ui.add_space(5.0);
-
-                // Normal WWM
                 ui.horizontal(|ui| {
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center).with_main_align(egui::Align::Center), |ui| {
                         let mut wwm_text = "🎯 Tự động chọn vùng dịch WWM";
@@ -642,14 +524,12 @@ impl UiRenderer for super::MainApp {
                             if let Some((win_x, win_y, win_w, win_h)) = get_game_bounds("Where Winds Meet") {
                                 let f_w = win_w as f32;
                                 let f_h = win_h as f32;
-
                                 let region = config::Region {
                                     x: win_x + (f_w * WWM_TEXT_REGION_X_RATIO) as i32 - WWM_REGION_PADDING,
                                     y: win_y + (f_h * WWM_TEXT_REGION_Y_RATIO) as i32 - WWM_REGION_PADDING,
                                     width: (f_w * WWM_TEXT_REGION_W_RATIO) as u32 + WWM_REGION_EXTRA_WIDTH,
                                     height: (f_h * WWM_TEXT_REGION_H_RATIO) as u32 + WWM_REGION_EXTRA_HEIGHT
                                 };
-
                                 self.config_state.config.fixed_regions.clear();
                                 self.config_state.config.fixed_regions.push(region.clone());
                                 self.config_state.current_prompt = config::Config::get_wuxia_prompt();
@@ -666,8 +546,6 @@ impl UiRenderer for super::MainApp {
                         ui.label(egui::RichText::new("(16:9)").italics().color(egui::Color32::GRAY));
                     });
                 });
-
-                // WWM with Name
                 ui.horizontal(|ui| {
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center).with_main_align(egui::Align::Center), |ui| {
                         let mut wwm_name_text = "🎯 Tự chọn vùng dịch WWM (có tên người thoại)";
@@ -679,14 +557,12 @@ impl UiRenderer for super::MainApp {
                             if let Some((win_x, win_y, win_w, win_h)) = get_game_bounds("Where Winds Meet") {
                                 let f_w = win_w as f32;
                                 let f_h = win_h as f32;
-                                
                                 let region = config::Region {
                                     x: win_x + (f_w * WWM_NAME_REGION_X_RATIO) as i32,
                                     y: win_y + (f_h * WWM_NAME_REGION_Y_RATIO) as i32,
                                     width: (f_w * WWM_NAME_REGION_W_RATIO) as u32,
                                     height: (f_h * WWM_NAME_REGION_H_RATIO) as u32
                                 };
-
                                 self.config_state.config.fixed_regions.clear();
                                 self.config_state.config.fixed_regions.push(region.clone());
                                 self.config_state.current_prompt = config::Config::get_wuxia_speaker_prompt();
@@ -703,8 +579,6 @@ impl UiRenderer for super::MainApp {
                         ui.label(egui::RichText::new("(16:9)").italics().color(egui::Color32::GRAY));
                     });
                 });
-
-                // Arrow Button
                 ui.horizontal(|ui| {
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center).with_main_align(egui::Align::Center), |ui| {
                         let mut arrow_text = "🏹 Tự động chọn vùng Mũi tên WWM";
@@ -716,7 +590,6 @@ impl UiRenderer for super::MainApp {
                             if let Some((win_x, win_y, win_w, win_h)) = get_game_bounds("Where Winds Meet") {
                                 let f_w = win_w as f32;
                                 let f_h = win_h as f32;
-
                                 let region = config::Region {
                                     x: win_x + (f_w * WWM_ARROW_REGION_X_RATIO) as i32,
                                     y: win_y + (f_h * WWM_ARROW_REGION_Y_RATIO) as i32,
@@ -737,40 +610,26 @@ impl UiRenderer for super::MainApp {
                     });
                 });
 
-                ui.add_space(5.0);
-                ui.label(egui::RichText::new("⚡ Tốc độ nhận diện mũi tên").strong());
-                if ui.add(egui::Slider::new(&mut self.config_state.config.arrow_check_interval, ARROW_CHECK_INTERVAL_MIN..=ARROW_CHECK_INTERVAL_MAX).text("s")).changed() {
-                    self.config_state.config.save().unwrap();
-                }
-                if (self.config_state.config.arrow_check_interval - DEFAULT_ARROW_CHECK_INTERVAL).abs() < 0.001 {
-                    ui.colored_label(egui::Color32::GREEN, "(Nên để mặc định: 0.02)");
-                } else {
-                    ui.label(format!("(Quét mỗi {:.2} giây)", self.config_state.config.arrow_check_interval));
-                }
-                ui.add_space(5.0);
+                // --- ĐÃ ẨN SLIDER TỐC ĐỘ MŨI TÊN TẠI ĐÂY ---
 
+                ui.add_space(5.0);
                 ui.horizontal(|ui| {
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center).with_main_align(egui::Align::Center), |ui| {
                         let btn_text = if self.wwm_state.auto_translate_active { "🔄 ĐANG BẬT TỰ ĐỘNG DỊCH" } else { "🔄 Bật Tự Động Dịch" };
                         let btn_color = if self.wwm_state.auto_translate_active { egui::Color32::DARK_GREEN } else { egui::Color32::from_rgb(60, 60, 60) };
-
                         if ui.add(egui::Button::new(egui::RichText::new(btn_text).strong().color(egui::Color32::WHITE)).fill(btn_color).min_size(egui::vec2(200.0, 30.0))).clicked() {
                             self.wwm_state.auto_translate_active = !self.wwm_state.auto_translate_active;
                             AUTO_TRANSLATE_ENABLED.store(self.wwm_state.auto_translate_active, Ordering::Relaxed);
-                            // Gọi thông báo UX
                             crate::show_toggle_notification(self.wwm_state.auto_translate_active);
                         }
                     });
                 });
-
                 ui.separator();
-
                 ui.horizontal(|ui| {
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center).with_main_align(egui::Align::Center), |ui| {
                         if ui.button("🐞 Debug Overlay").clicked() {
                             overlay::toggle_debug_overlay();
                         }
-
                         if ui.button("📂 Đổi ảnh mũi tên").clicked() {
                             if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png"]).pick_file() {
                                 if let Ok(bytes) = fs::read(&path) {
@@ -790,9 +649,8 @@ impl UiRenderer for super::MainApp {
                         }
                     });
                 });
-                // Đã xóa ui.add_space(5.0) ở cuối để sát lề dưới
-            }); // End CollapsingHeader
-        }); // End vertical_centered
+            });
+        });
     }
 
     fn sync_config_from_file(&mut self) {
@@ -809,30 +667,18 @@ impl UiRenderer for super::MainApp {
                 for vk in VK_MIN..VK_MAX {
                     if (winapi::um::winuser::GetAsyncKeyState(vk) as u16 & KEY_STATE_MASK) != 0 {
                         if vk == winapi::um::winuser::VK_LBUTTON || vk == winapi::um::winuser::VK_RBUTTON || vk == winapi::um::winuser::VK_MBUTTON { continue; }
-
                         let key_name = crate::key_utils::get_name_from_vk(vk);
-
                         match target {
                             BindingTarget::Translate => { self.hotkey_state.hotkey_translate = key_name.clone(); self.config_state.config.hotkey_translate = key_name; }
                             BindingTarget::Select => { self.hotkey_state.hotkey_select = key_name.clone(); self.config_state.config.hotkey_select = key_name; }
                             BindingTarget::Instant => { self.hotkey_state.hotkey_instant = key_name.clone(); self.config_state.config.hotkey_instant = key_name; }
                             BindingTarget::Auto => { self.hotkey_state.hotkey_auto = key_name.clone(); self.config_state.config.hotkey_auto = key_name; }
                             BindingTarget::ToggleAuto => { self.hotkey_state.hotkey_toggle_auto = key_name.clone(); self.config_state.config.hotkey_toggle_auto = key_name; }
-                            // --- BINDING AUX REGIONS ---
-                            BindingTarget::AuxSelect(idx) => {
-                                if idx < self.config_state.config.aux_regions.len() {
-                                    self.config_state.config.aux_regions[idx].hotkey_select = key_name;
-                                }
-                            }
-                            BindingTarget::AuxTranslate(idx) => {
-                                if idx < self.config_state.config.aux_regions.len() {
-                                    self.config_state.config.aux_regions[idx].hotkey_translate = key_name;
-                                }
-                            }
+                            BindingTarget::AuxSelect(idx) => { if idx < self.config_state.config.aux_regions.len() { self.config_state.config.aux_regions[idx].hotkey_select = key_name; } }
+                            BindingTarget::AuxTranslate(idx) => { if idx < self.config_state.config.aux_regions.len() { self.config_state.config.aux_regions[idx].hotkey_translate = key_name; } }
                         }
                         self.config_state.config.save().unwrap();
                         HOTKEYS_NEED_UPDATE.store(true, Ordering::Relaxed);
-
                         self.binding_target = None;
                         IS_BINDING_MODE.store(false, Ordering::Relaxed);
                         std::thread::sleep(std::time::Duration::from_millis(BINDING_SLEEP_MS));
@@ -843,90 +689,58 @@ impl UiRenderer for super::MainApp {
         }
     }
 
-    // 2. Implement hàm render_reader_window
     fn render_reader_window(&mut self, ctx: &egui::Context) {
         if !self.ui_state.reader.is_open { return; }
-
         let mut open = true;
-        egui::Window::new("Trình đọc văn bản (Text to Speech)")
-            .open(&mut open)
-            .resize(|r| r.fixed_size(egui::vec2(600.0, 700.0)))
-            .show(ctx, |ui| {
-
-                ui.horizontal(|ui| {
-                    if ui.button("📂 Mở file Text").clicked() {
-                        if let Some(path) = rfd::FileDialog::new().add_filter("Text", &["txt"]).pick_file() {
-                             if let Ok(content) = std::fs::read_to_string(path) {
-                                 self.ui_state.reader.raw_text = content;
-                                 self.ui_state.reader.parse_text();
-                             }
-                        }
-                    }
-                    if ui.button("🧹 Xóa hết").clicked() {
-                        self.ui_state.reader.raw_text.clear();
-                        self.ui_state.reader.chunks.clear();
-                        self.ui_state.reader.is_playing = false;
-                        self.ui_state.reader.current_index = 0;
-                    }
-                });
-
-                ui.label("Nhập văn bản vào đây:");
-                if ui.add(egui::TextEdit::multiline(&mut self.ui_state.reader.raw_text)
-                    .desired_rows(5)
-                    .desired_width(f32::INFINITY))
-                    .changed()
-                {
-                    // Nếu người dùng sửa text gốc, ta dừng đọc và parse lại
-                    self.ui_state.reader.is_playing = false;
-                    self.ui_state.reader.parse_text();
-                }
-
-                ui.separator();
-
-                // Controls
-                ui.horizontal(|ui| {
-                    let icon_play = if self.ui_state.reader.is_playing { "⏸ Tạm dừng" } else { "▶ Đọc tiếp" };
-                    if ui.button(icon_play).clicked() {
-                         self.ui_state.reader.is_playing = !self.ui_state.reader.is_playing;
-                         if self.ui_state.reader.chunks.is_empty() {
+        egui::Window::new("Trình đọc văn bản (Text to Speech)").open(&mut open).resize(|r| r.fixed_size(egui::vec2(600.0, 700.0))).show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                if ui.button("📂 Mở file Text").clicked() {
+                    if let Some(path) = rfd::FileDialog::new().add_filter("Text", &["txt"]).pick_file() {
+                         if let Ok(content) = std::fs::read_to_string(path) {
+                             self.ui_state.reader.raw_text = content;
                              self.ui_state.reader.parse_text();
-                             self.ui_state.reader.is_playing = true;
                          }
                     }
-
-                    if ui.button("⏹ Dừng lại").clicked() {
-                        self.ui_state.reader.is_playing = false;
-                        self.ui_state.reader.current_index = 0;
-                    }
-
-                    ui.label("Tốc độ:");
-                    ui.add(egui::Slider::new(&mut self.config_state.config.speed, 0.5..=2.0));
-                });
-
-                ui.separator();
-                ui.label(egui::RichText::new("Danh sách câu (Nhấn vào để đọc từ câu đó):").strong());
-
-                // List sentences
-                egui::ScrollArea::vertical().stick_to_bottom(true).max_height(400.0).show(ui, |ui| {
-                    for (i, chunk) in self.ui_state.reader.chunks.iter().enumerate() {
-                        let is_active = i == self.ui_state.reader.current_index;
-                        let text = format!("{}. {}", i + 1, chunk);
-
-                        let label = egui::SelectableLabel::new(is_active, text);
-                        if ui.add_sized([ui.available_width(), 0.0], label).clicked() {
-                            self.ui_state.reader.current_index = i;
-                            self.ui_state.reader.is_playing = true;
-
-                            // SỬA: Xóa buffer cũ khi click nhảy câu để tránh đọc sai
-                            self.next_audio_buffer = None;
-                            self.is_downloading_next = false;
-                            // Thread âm thanh hiện tại vẫn sẽ đọc hết câu cũ (do blocking),
-                            // nhưng câu tiếp theo sẽ được load đúng index mới
-                        }
-                    }
-                });
+                }
+                if ui.button("🧹 Xóa hết").clicked() {
+                    self.ui_state.reader.raw_text.clear();
+                    self.ui_state.reader.chunks.clear();
+                    self.ui_state.reader.is_playing = false;
+                    self.ui_state.reader.current_index = 0;
+                }
             });
-
+            ui.label("Nhập văn bản vào đây:");
+            if ui.add(egui::TextEdit::multiline(&mut self.ui_state.reader.raw_text).desired_rows(5).desired_width(f32::INFINITY)).changed() {
+                self.ui_state.reader.is_playing = false;
+                self.ui_state.reader.parse_text();
+            }
+            ui.separator();
+            ui.horizontal(|ui| {
+                let icon_play = if self.ui_state.reader.is_playing { "⏸ Tạm dừng" } else { "▶ Đọc tiếp" };
+                if ui.button(icon_play).clicked() {
+                     self.ui_state.reader.is_playing = !self.ui_state.reader.is_playing;
+                     if self.ui_state.reader.chunks.is_empty() { self.ui_state.reader.parse_text(); self.ui_state.reader.is_playing = true; }
+                }
+                if ui.button("⏹ Dừng lại").clicked() { self.ui_state.reader.is_playing = false; self.ui_state.reader.current_index = 0; }
+                ui.label("Tốc độ:");
+                ui.add(egui::Slider::new(&mut self.config_state.config.speed, 0.5..=2.0));
+            });
+            ui.separator();
+            ui.label(egui::RichText::new("Danh sách câu (Nhấn vào để đọc từ câu đó):").strong());
+            egui::ScrollArea::vertical().stick_to_bottom(true).max_height(400.0).show(ui, |ui| {
+                for (i, chunk) in self.ui_state.reader.chunks.iter().enumerate() {
+                    let is_active = i == self.ui_state.reader.current_index;
+                    let text = format!("{}. {}", i + 1, chunk);
+                    let label = egui::SelectableLabel::new(is_active, text);
+                    if ui.add_sized([ui.available_width(), 0.0], label).clicked() {
+                        self.ui_state.reader.current_index = i;
+                        self.ui_state.reader.is_playing = true;
+                        self.next_audio_buffer = None;
+                        self.is_downloading_next = false;
+                    }
+                }
+            });
+        });
         self.ui_state.reader.is_open = open;
     }
 

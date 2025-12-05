@@ -12,7 +12,7 @@ pub struct Region {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct CustomPrompt {
-    pub content: String, 
+    pub content: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -33,10 +33,10 @@ pub struct Config {
     pub active_groq_index: usize,
 
     pub current_prompt: String,
-    
+
     #[serde(default)]
     pub saved_prompts: Vec<CustomPrompt>,
-    
+
     pub hotkey_translate: String,
     pub hotkey_select: String,
     pub hotkey_instant: String,
@@ -45,7 +45,7 @@ pub struct Config {
     pub split_tts: bool,
     pub use_tts: bool,
     pub show_overlay: bool,
-    
+
     pub fixed_regions: Vec<Region>,
     pub arrow_region: Option<Region>,
     pub instant_region: Option<Region>,
@@ -63,7 +63,6 @@ pub struct Config {
     #[serde(default)]
     pub copy_instant_only: bool,
 
-    // --- THÊM DÒNG NÀY ---
     #[serde(default)]
     pub copy_original: bool,
 
@@ -77,7 +76,9 @@ pub struct Config {
     pub freeze_screen: bool,
 }
 
-fn default_interval() -> f32 { 0.02 }
+// --- SỬA Ở ĐÂY: Mặc định là 0.1 giây ---
+fn default_interval() -> f32 { 0.1 }
+// ---------------------------------------
 fn default_font_size() -> i32 { 24 }
 fn default_dark_mode() -> bool { false }
 
@@ -103,10 +104,10 @@ impl Default for Config {
             instant_region: None,
             aux_regions: Vec::new(),
             selected_api: "groq".to_string(),
-            arrow_check_interval: 0.02,
+            // Đảm bảo load mặc định cũng là 0.1
+            arrow_check_interval: 0.1,
             auto_copy: false,
             copy_instant_only: false,
-            // --- THÊM DÒNG NÀY ---
             copy_original: false,
             overlay_font_size: 24,
             is_dark_mode: false,
@@ -188,7 +189,7 @@ impl Config {
         fs::write(path, content)?;
         Ok(())
     }
-    
+
     pub fn get_current_groq_key(&self) -> String {
         if self.groq_api_keys.is_empty() { return String::new(); }
         if self.active_groq_index < self.groq_api_keys.len() { self.groq_api_keys[self.active_groq_index].clone() }

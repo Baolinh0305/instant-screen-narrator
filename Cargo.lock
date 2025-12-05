@@ -4045,6 +4045,7 @@ dependencies = [
  "futures",
  "global-hotkey",
  "image 0.24.9",
+ "rand",
  "regex",
  "reqwest",
  "rfd",
